@@ -19,11 +19,21 @@ const reasoningOptionDescription = app.reasoningOptionDescription;
 const resolveSlashAction = app.resolveSlashAction;
 const padRight = app.padRight;
 
+const compact_header_height: u16 = 3;
+const logo_header_height: u16 = 18;
+const footer_height: u16 = 3;
+
+const RpcChatMessage = struct {
+    role: []const u8,
+    content: []const u8,
+};
+
 const Model = struct {
     allocator: std.mem.Allocator,
     messages: std.array_list.Managed(ChatMessage),
     composer: zz.TextInput,
     transcript: zz.Viewport,
+    header_height: u16,
     show_commands: bool,
 
     next_id: u64,
@@ -40,6 +50,7 @@ const Model = struct {
 
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
+        mouse: zz.MouseEvent,
         window_size: zz.msg.WindowSize,
         tick: zz.msg.Tick,
 
@@ -55,7 +66,8 @@ const Model = struct {
             .allocator = allocator,
             .messages = std.array_list.Managed(ChatMessage).init(allocator),
             .composer = zz.TextInput.init(allocator),
-            .transcript = zz.Viewport.init(allocator, ctx.width, ctx.height -| 4),
+            .transcript = zz.Viewport.init(allocator, ctx.width, transcriptHeight(ctx.height)),
+            .header_height = headerHeight(ctx.height),
             .show_commands = false,
             .next_id = 1,
             .pending_response_id = null,
@@ -76,7 +88,7 @@ const Model = struct {
         self.composer.cursor_style = self.composer.cursor_style.fg(.black).bg(.green).bold(true);
 
         self.transcript.setWrap(true);
-        self.transcript.setShowScrollbar(false);
+        self.transcript.setShowScrollbar(true);
         self.initSelectionLists();
 
         self.resize(ctx.width, ctx.height);
@@ -100,6 +112,7 @@ const Model = struct {
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (msg) {
             .key => |key| return self.handleKey(key, ctx),
+            .mouse => |mouse| return self.handleMouse(mouse),
             .window_size => |size| {
                 self.resize(size.width, size.height);
                 self.rebuildTranscript() catch {};
@@ -129,6 +142,25 @@ const Model = struct {
                 return .none;
             },
         }
+    }
+
+    fn handleMouse(self: *Model, mouse: zz.MouseEvent) zz.Cmd(Msg) {
+        if (self.mode != .chat) return .none;
+        if (!self.isTranscriptMouseEvent(mouse)) return .none;
+
+        switch (mouse.button) {
+            .wheel_up => self.transcript.scrollUp(3),
+            .wheel_down => self.transcript.scrollDown(3),
+            else => {},
+        }
+
+        return .none;
+    }
+
+    fn isTranscriptMouseEvent(self: *const Model, mouse: zz.MouseEvent) bool {
+        const transcript_top = self.header_height;
+        const transcript_bottom = transcript_top + self.transcript.height;
+        return mouse.y >= transcript_top and mouse.y < transcript_bottom;
     }
 
     fn handleKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -366,10 +398,14 @@ const Model = struct {
         var client = try rpc.SubprocessClient.init(ctx.allocator, ctx.io, &.{ "python3", "./mod/test.py" }, .{});
         defer client.deinit();
 
+        const history = try self.rpcHistory(ctx.allocator, message_id);
+        defer ctx.allocator.free(history);
+
         var conn = client.connection();
         try conn.sendRequest(.{ .integer = @intCast(message_id) }, "message.received", .{
             .message_id = message_id,
             .text = text,
+            .messages = history,
         });
         try client.closeInput();
 
@@ -388,11 +424,44 @@ const Model = struct {
         return owned_text;
     }
 
+    fn rpcHistory(self: *const Model, allocator: std.mem.Allocator, pending_message_id: u64) ![]RpcChatMessage {
+        var count: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.id == pending_message_id) continue;
+            if (msg.state != .complete) continue;
+            count += 1;
+        }
+
+        const history = try allocator.alloc(RpcChatMessage, count);
+        var index: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.id == pending_message_id) continue;
+            if (msg.state != .complete) continue;
+
+            history[index] = .{
+                .role = rpcRoleName(msg.role),
+                .content = msg.text,
+            };
+            index += 1;
+        }
+
+        return history;
+    }
+
     fn expectExitedZero(term: std.process.Child.Term) !void {
         switch (term) {
             .exited => |code| if (code == 0) return else return error.ChildExitedNonZero,
             else => return error.ChildDidNotExitNormally,
         }
+    }
+
+    fn rpcRoleName(role: app.Role) []const u8 {
+        return switch (role) {
+            .user => "user",
+            .assistant => "assistant",
+            .tool => "tool",
+            .system => "system",
+        };
     }
 
     fn freePendingResponseText(self: *Model) void {
@@ -468,35 +537,10 @@ const Model = struct {
         const pink = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
         const dim = (zz.Style{}).fg(.gray(10));
 
-        const logo_view = pink.render(allocator, logo) catch logo;
-        const intro_raw = std.fmt.allocPrint(
-            allocator,
-            "\nWelcome to NexDev - CLI\n\n\nModel: {s}\n\nReasoning Effort: {s}\n\nStatus: {s}",
-            .{ self.active_model, self.active_reasoning, self.status },
-        ) catch "Welcome to NexDev - CLI";
-        const intro_view = green.render(allocator, intro_raw) catch intro_raw;
-
-        const top = zz.join.horizontalSep(
-            allocator,
-            .top,
-            "      ",
-            &.{ logo_view, intro_view },
-        ) catch intro_view;
-
-        const top_height: u16 = 24;
-        const top_block = zz.place.place(
-            allocator,
-            ctx.width,
-            top_height,
-            .left,
-            .top,
-            top,
-        ) catch top;
-
         const separator = dim.render(
             allocator,
-            "Enter sends | Esc quits | PageUp/PageDown scroll",
-        ) catch "Enter sends | Esc quits | PageUp/PageDown scroll";
+            "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll",
+        ) catch "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll";
 
         const center_view = switch (self.mode) {
             .chat => transcript_view,
@@ -521,13 +565,62 @@ const Model = struct {
         else
             "";
 
-        const body = zz.join.vertical(
-            allocator,
-            .left,
-            &.{ top_block, center_view, slash_popup, separator, input_line },
-        ) catch top_block;
+        const top_block = self.renderHeader(allocator, ctx.width, pink, green, dim) catch "NexDev - CLI";
+
+        const body = if (self.show_commands)
+            zz.join.vertical(
+                allocator,
+                .left,
+                &.{ top_block, center_view, slash_popup, separator, input_line },
+            ) catch top_block
+        else
+            zz.join.vertical(
+                allocator,
+                .left,
+                &.{ top_block, center_view, separator, input_line },
+            ) catch top_block;
 
         return body;
+    }
+
+    fn renderHeader(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        width: u16,
+        title_style: zz.Style,
+        meta_style: zz.Style,
+        dim_style: zz.Style,
+    ) ![]const u8 {
+        const title = try title_style.render(allocator, "NexDev - CLI");
+        const meta_raw = try std.fmt.allocPrint(
+            allocator,
+            "Model: {s} | Reasoning: {s} | Status: {s}",
+            .{ self.active_model, self.active_reasoning, self.status },
+        );
+        const meta = try meta_style.render(allocator, meta_raw);
+        const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
+
+        const content = if (self.header_height == logo_header_height) blk: {
+            const logo_view = try title_style.render(allocator, logo);
+            const status_view = try zz.join.vertical(
+                allocator,
+                .left,
+                &.{ title, meta, rule },
+            );
+
+            break :blk try zz.join.horizontalSep(
+                allocator,
+                .top,
+                "      ",
+                &.{ logo_view, status_view },
+            );
+        } else try zz.join.vertical(
+            allocator,
+            .left,
+            &.{ title, meta, rule },
+        );
+
+        return zz.place.place(allocator, width, self.header_height, .left, .top, content);
     }
 
     fn renderSelectionPanel(
@@ -681,17 +774,27 @@ const Model = struct {
     }
 
     pub fn resize(self: *Model, width: u16, height: u16) void {
-        const top_height: u16 = 24;
-        const footer_height: u16 = 2;
-        const transcript_height = height -| top_height -| footer_height;
-
-        self.transcript.setSize(width, transcript_height);
+        self.header_height = headerHeight(height);
+        self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
     }
 };
 
+fn headerHeight(height: u16) u16 {
+    return if (height > logo_header_height + footer_height)
+        logo_header_height
+    else
+        compact_header_height;
+}
+
+fn transcriptHeight(height: u16) u16 {
+    return height -| headerHeight(height) -| footer_height;
+}
+
 pub fn main(init: std.process.Init) !void {
-    var program = try zz.Program(Model).init(init.gpa, init.io, init.environ_map);
+    var program = try zz.Program(Model).initWithOptions(init.gpa, init.io, init.environ_map, .{
+        .mouse = true,
+    });
     defer program.deinit();
     try program.run();
 }
