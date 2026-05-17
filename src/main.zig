@@ -1,6 +1,7 @@
 const std = @import("std");
 const zz = @import("zigzag");
 const app = @import("nexdev_cli");
+const rpc = @import("zig_rpc");
 
 const ChatMessage = app.ChatMessage;
 const AgentDelta = app.AgentDelta;
@@ -9,7 +10,6 @@ const AgentFailed = app.AgentFailed;
 const UiMode = app.UiMode;
 const ModelOption = app.ModelOption;
 const ReasoningOption = app.ReasoningOption;
-const demo_response = app.demo_response;
 const logo = app.logo;
 const slash_commands = app.slash_commands;
 const modelOptionLabel = app.modelOptionLabel;
@@ -28,8 +28,9 @@ const Model = struct {
 
     next_id: u64,
     pending_response_id: ?u64,
+    pending_response_text: ?[]u8,
     status: []const u8,
-    demo_cursor: usize,
+    response_cursor: usize,
 
     mode: UiMode,
     model_list: zz.List(ModelOption),
@@ -58,8 +59,9 @@ const Model = struct {
             .show_commands = false,
             .next_id = 1,
             .pending_response_id = null,
+            .pending_response_text = null,
             .status = "idle",
-            .demo_cursor = 0,
+            .response_cursor = 0,
             .mode = .chat,
             .model_list = zz.List(ModelOption).init(allocator),
             .reasoning_list = zz.List(ReasoningOption).init(allocator),
@@ -87,6 +89,7 @@ const Model = struct {
         for (self.messages.items) |*message| {
             message.deinit(self.allocator);
         }
+        self.freePendingResponseText();
         self.messages.deinit();
         self.composer.deinit();
         self.transcript.deinit();
@@ -106,12 +109,15 @@ const Model = struct {
                 return self.pollAgent();
             },
             .agent_delta => |delta| {
-                self.applyAgentDelta(delta) catch {};
+                self.applyAgentDelta(delta) catch {
+                    self.status = "stream failed";
+                };
                 return .none;
             },
             .agent_done => |done| {
                 if (self.pending_response_id == done.message_id) {
                     self.pending_response_id = null;
+                    self.freePendingResponseText();
                     self.status = "idle";
                     self.markMessageComplete(done.message_id);
                 }
@@ -250,7 +256,6 @@ const Model = struct {
             return .none;
         }
 
-        _ = ctx;
         const raw = self.composer.getValue();
         const trimmed = std.mem.trim(u8, raw, " \t\n\r");
 
@@ -284,10 +289,20 @@ const Model = struct {
             return .none;
         };
 
-        self.composer.setValue("") catch {};
         self.pending_response_id = assistant_id;
+        self.status = "Calling Python...";
+        self.response_cursor = 0;
+        self.freePendingResponseText();
+
+        const response_text = self.requestPythonResponse(ctx, assistant_id, user_text) catch {
+            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "RPC request failed" }) catch {};
+            return .none;
+        };
+
+        self.pending_response_text = response_text;
+
+        self.composer.setValue("") catch {};
         self.status = "Thinking...";
-        self.demo_cursor = 0;
         self.rebuildTranscript() catch {};
         self.transcript.gotoBottom();
 
@@ -300,7 +315,8 @@ const Model = struct {
         }
         self.messages.clearRetainingCapacity();
         self.pending_response_id = null;
-        self.demo_cursor = 0;
+        self.freePendingResponseText();
+        self.response_cursor = 0;
         self.mode = .chat;
         self.show_commands = false;
         self.composer.setValue("") catch {};
@@ -309,20 +325,21 @@ const Model = struct {
 
     fn pollAgent(self: *Model) zz.Cmd(Msg) {
         const response_id = self.pending_response_id orelse return .none;
+        const response_text = self.pending_response_text orelse return .none;
 
-        if (self.demo_cursor >= demo_response.len) {
+        if (self.response_cursor >= response_text.len) {
             return zz.Cmd(Msg).send(.{ .agent_done = .{ .message_id = response_id } });
         }
 
         const chunk_size: usize = 5;
-        const start = self.demo_cursor;
-        const end = @min(demo_response.len, start + chunk_size);
-        self.demo_cursor = end;
+        const start = self.response_cursor;
+        const end = @min(response_text.len, start + chunk_size);
+        self.response_cursor = end;
 
         return zz.Cmd(Msg).send(.{
             .agent_delta = .{
                 .message_id = response_id,
-                .bytes = demo_response[start..end],
+                .bytes = response_text[start..end],
             },
         });
     }
@@ -343,6 +360,46 @@ const Model = struct {
 
         try self.rebuildTranscript();
         self.transcript.gotoBottom();
+    }
+
+    fn requestPythonResponse(self: *Model, ctx: *const zz.Context, message_id: u64, text: []const u8) ![]u8 {
+        var client = try rpc.SubprocessClient.init(ctx.allocator, ctx.io, &.{ "python3", "./mod/test.py" }, .{});
+        defer client.deinit();
+
+        var conn = client.connection();
+        try conn.sendRequest(.{ .integer = @intCast(message_id) }, "message.received", .{
+            .message_id = message_id,
+            .text = text,
+        });
+        try client.closeInput();
+
+        var response_message = try conn.readMessage();
+        defer response_message.deinit();
+
+        const response = try response_message.asResponse();
+        if (response.rpc_error != null) {
+            return error.RpcPeerError;
+        }
+
+        const response_text = try response.asText();
+        const owned_text = try self.allocator.dupe(u8, response_text);
+        errdefer self.allocator.free(owned_text);
+        try expectExitedZero(try client.wait());
+        return owned_text;
+    }
+
+    fn expectExitedZero(term: std.process.Child.Term) !void {
+        switch (term) {
+            .exited => |code| if (code == 0) return else return error.ChildExitedNonZero,
+            else => return error.ChildDidNotExitNormally,
+        }
+    }
+
+    fn freePendingResponseText(self: *Model) void {
+        if (self.pending_response_text) |text| {
+            self.allocator.free(text);
+            self.pending_response_text = null;
+        }
     }
 
     fn applyAgentFailure(self: *Model, failed: AgentFailed) !void {
