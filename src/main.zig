@@ -10,12 +10,15 @@ const AgentFailed = app.AgentFailed;
 const UiMode = app.UiMode;
 const ModelOption = app.ModelOption;
 const ReasoningOption = app.ReasoningOption;
+const SandboxOption = app.SandboxOption;
 const logo = app.logo;
 const slash_commands = app.slash_commands;
 const modelOptionLabel = app.modelOptionLabel;
 const modelOptionDescription = app.modelOptionDescription;
 const reasoningOptionLabel = app.reasoningOptionLabel;
 const reasoningOptionDescription = app.reasoningOptionDescription;
+const sandboxOptionLabel = app.sandboxOptionLabel;
+const sandboxOptionDescription = app.sandboxOptionDescription;
 const resolveSlashAction = app.resolveSlashAction;
 const padRight = app.padRight;
 
@@ -47,6 +50,7 @@ const AgentTask = struct {
     message_id: u64,
     model: []u8,
     reasoning_effort: []u8,
+    sandbox_mode: []u8,
     text: []u8,
     history: []RpcChatMessage,
     thread: ?std.Thread = null,
@@ -60,6 +64,7 @@ const AgentTask = struct {
         message_id: u64,
         model: []const u8,
         reasoning_effort: []const u8,
+        sandbox_mode: []const u8,
         text: []const u8,
         history: []const RpcChatMessage,
     ) !*AgentTask {
@@ -77,6 +82,9 @@ const AgentTask = struct {
 
         const owned_reasoning_effort = try allocator.dupe(u8, reasoning_effort);
         errdefer allocator.free(owned_reasoning_effort);
+
+        const owned_sandbox_mode = try allocator.dupe(u8, sandbox_mode);
+        errdefer allocator.free(owned_sandbox_mode);
 
         const owned_history = try allocator.alloc(RpcChatMessage, history.len);
         errdefer allocator.free(owned_history);
@@ -103,6 +111,7 @@ const AgentTask = struct {
             .message_id = message_id,
             .model = owned_model,
             .reasoning_effort = owned_reasoning_effort,
+            .sandbox_mode = owned_sandbox_mode,
             .text = owned_text,
             .history = owned_history,
         };
@@ -137,6 +146,7 @@ const AgentTask = struct {
         self.allocator.free(self.npm_path);
         self.allocator.free(self.model);
         self.allocator.free(self.reasoning_effort);
+        self.allocator.free(self.sandbox_mode);
         for (self.history) |entry| {
             self.allocator.free(entry.content);
         }
@@ -155,6 +165,7 @@ const AgentTask = struct {
             self.message_id,
             self.model,
             self.reasoning_effort,
+            self.sandbox_mode,
             self.text,
             self.history,
         ) catch |err| AgentTaskResult{
@@ -189,8 +200,10 @@ const Model = struct {
     mode: UiMode,
     model_list: zz.List(ModelOption),
     reasoning_list: zz.List(ReasoningOption),
+    sandbox_list: zz.List(SandboxOption),
     active_model: []const u8,
     active_reasoning: []const u8,
+    active_sandbox: []const u8,
 
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
@@ -223,8 +236,10 @@ const Model = struct {
             .mode = .chat,
             .model_list = zz.List(ModelOption).init(allocator),
             .reasoning_list = zz.List(ReasoningOption).init(allocator),
+            .sandbox_list = zz.List(SandboxOption).init(allocator),
             .active_model = modelOptionLabel(.gpt_5_5),
             .active_reasoning = reasoningOptionLabel(.medium),
+            .active_sandbox = sandboxOptionLabel(.workspace_write),
         };
         self.composer.setPrompt("> ");
         self.composer.setPlaceholder("Type your message...");
@@ -254,6 +269,7 @@ const Model = struct {
         self.transcript.deinit();
         self.model_list.deinit();
         self.reasoning_list.deinit();
+        self.sandbox_list.deinit();
     }
 
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -319,6 +335,7 @@ const Model = struct {
             .chat => self.handleChatKey(key, ctx),
             .select_model => self.handleModelSelectionKey(key),
             .select_reasoning => self.handleReasoningSelectionKey(key),
+            .select_sandbox => self.handleSandboxSelectionKey(key),
         };
     }
 
@@ -385,6 +402,28 @@ const Model = struct {
         }
     }
 
+    fn handleSandboxSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
+        switch (key.key) {
+            .escape => {
+                self.mode = .chat;
+                self.status = "idle";
+                return .none;
+            },
+            .enter => {
+                if (self.sandbox_list.selectedValue()) |value| {
+                    self.active_sandbox = sandboxOptionLabel(value);
+                    self.mode = .chat;
+                    self.status = "sandbox updated";
+                }
+                return .none;
+            },
+            else => {
+                self.sandbox_list.handleKey(key);
+                return .none;
+            },
+        }
+    }
+
     fn handleComposerSubmit(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const raw = self.composer.getValue();
         const trimmed = std.mem.trim(u8, raw, " \t\n\r");
@@ -419,6 +458,11 @@ const Model = struct {
                 self.prepareReasoningSelection();
                 self.mode = .select_reasoning;
                 self.status = "select reasoning effort";
+            },
+            .sandbox => {
+                self.prepareSandboxSelection();
+                self.mode = .select_sandbox;
+                self.status = "select sandbox mode";
             },
             .clear => {
                 self.clearSession();
@@ -494,6 +538,7 @@ const Model = struct {
             assistant_id,
             self.active_model,
             self.active_reasoning,
+            self.active_sandbox,
             user_text,
             history,
         ) catch {
@@ -751,6 +796,13 @@ const Model = struct {
                 self.active_reasoning,
                 self.reasoning_list.view(allocator) catch "",
             ) catch transcript_view,
+            .select_sandbox => self.renderSelectionPanel(
+                allocator,
+                ctx.width,
+                "Select Sandbox",
+                self.active_sandbox,
+                self.sandbox_list.view(allocator) catch "",
+            ) catch transcript_view,
         };
         const input_line = green.render(allocator, composer_view) catch composer_view;
         const slash_popup = if (self.show_commands)
@@ -787,8 +839,8 @@ const Model = struct {
         const title = try title_style.render(allocator, "NexDev - CLI");
         const meta_raw = try std.fmt.allocPrint(
             allocator,
-            "Model: {s} | Reasoning: {s} | Status: {s}",
-            .{ self.active_model, self.active_reasoning, self.status },
+            "Model: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
+            .{ self.active_model, self.active_reasoning, self.active_sandbox, self.status },
         );
         const meta = try meta_style.render(allocator, meta_raw);
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
@@ -940,8 +992,19 @@ const Model = struct {
             zz.List(ReasoningOption).Item.withDescription(.high, reasoningOptionLabel(.high), reasoningOptionDescription(.high)),
         }) catch {};
 
+        self.sandbox_list.height = 5;
+        self.sandbox_list.cursor_style = self.sandbox_list.cursor_style.fg(.green).bold(true);
+        self.sandbox_list.selected_style = self.sandbox_list.selected_style.fg(.green);
+        self.sandbox_list.status_message = "Enter to select";
+        self.sandbox_list.addItems(&.{
+            zz.List(SandboxOption).Item.withDescription(.read_only, sandboxOptionLabel(.read_only), sandboxOptionDescription(.read_only)),
+            zz.List(SandboxOption).Item.withDescription(.workspace_write, sandboxOptionLabel(.workspace_write), sandboxOptionDescription(.workspace_write)),
+            zz.List(SandboxOption).Item.withDescription(.danger_full_access, sandboxOptionLabel(.danger_full_access), sandboxOptionDescription(.danger_full_access)),
+        }) catch {};
+
         self.prepareModelSelection();
         self.prepareReasoningSelection();
+        self.prepareSandboxSelection();
     }
 
     fn prepareModelSelection(self: *Model) void {
@@ -966,6 +1029,17 @@ const Model = struct {
         self.reasoning_list.selectCurrent();
     }
 
+    fn prepareSandboxSelection(self: *Model) void {
+        self.sandbox_list.gotoFirst();
+        for (self.sandbox_list.items.items, 0..) |item, index| {
+            if (std.mem.eql(u8, sandboxOptionLabel(item.value), self.active_sandbox)) {
+                self.sandbox_list.cursor = index;
+                break;
+            }
+        }
+        self.sandbox_list.selectCurrent();
+    }
+
     pub fn resize(self: *Model, width: u16, height: u16) void {
         self.header_height = headerHeight(height);
         self.transcript.setSize(width, transcriptHeight(height));
@@ -981,6 +1055,7 @@ fn requestTypeScriptResponse(
     message_id: u64,
     model: []const u8,
     reasoning_effort: []const u8,
+    sandbox_mode: []const u8,
     text: []const u8,
     history: []const RpcChatMessage,
 ) !AgentTaskResult {
@@ -994,6 +1069,7 @@ fn requestTypeScriptResponse(
         .message_id = message_id,
         .model = model,
         .reasoning_effort = reasoning_effort,
+        .sandbox_mode = sandbox_mode,
         .text = text,
         .messages = history,
     });

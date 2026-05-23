@@ -5,6 +5,7 @@ import {
   type ModelReasoningEffort,
   type RunResult,
   type RunStreamedResult,
+  type SandboxMode,
   type Thread,
   type ThreadOptions,
   type TurnOptions,
@@ -15,6 +16,7 @@ export type ReasoningEffort = ModelReasoningEffort;
 export type BaseAgent = {
   model?: string;
   reasoningEffort?: string;
+  sandboxMode?: string;
   workspaceDir?: string;
   systemInstruction?: string;
   skipGitRepoCheck?: boolean;
@@ -50,6 +52,12 @@ const reasoningEfforts: ModelReasoningEffort[] = [
   "xhigh",
 ];
 
+const sandboxModes: SandboxMode[] = [
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+];
+
 export function buildAgent(parameters: BaseAgent = {}): BuiltAgent {
   const codex = parameters.codex ?? new Codex(parameters.codexOptions);
   const config = buildThreadOptions(parameters);
@@ -82,6 +90,7 @@ export function buildThreadOptions(parameters: BaseAgent): ThreadOptions {
   const options: ThreadOptions = { ...(parameters.threadOptions ?? {}) };
   const model = normalizeModel(parameters.model);
   const reasoningEffort = normalizeReasoningEffort(parameters.reasoningEffort);
+  const sandboxMode = normalizeSandboxMode(parameters.sandboxMode);
   const workspaceDir = normalizedNonEmpty(parameters.workspaceDir);
 
   if (model) {
@@ -89,6 +98,9 @@ export function buildThreadOptions(parameters: BaseAgent): ThreadOptions {
   }
   if (reasoningEffort) {
     options.modelReasoningEffort = reasoningEffort;
+  }
+  if (sandboxMode) {
+    options.sandboxMode = sandboxMode;
   }
   if (workspaceDir) {
     options.workingDirectory = workspaceDir;
@@ -120,6 +132,19 @@ export function normalizeReasoningEffort(
   throw new Error(`Unsupported reasoning effort: ${reasoningEffort}`);
 }
 
+export function normalizeSandboxMode(
+  sandboxMode: string | undefined,
+): SandboxMode | undefined {
+  const normalized = normalizedNonEmpty(sandboxMode)?.toLowerCase();
+  if (!normalized) return undefined;
+
+  if (isSandboxMode(normalized)) {
+    return normalized;
+  }
+
+  throw new Error(`Unsupported sandbox mode: ${sandboxMode}`);
+}
+
 export function applySystemInstruction(
   input: Input,
   systemInstruction: string | undefined,
@@ -142,4 +167,8 @@ function normalizedNonEmpty(value: string | undefined): string | undefined {
 
 function isReasoningEffort(value: string): value is ModelReasoningEffort {
   return reasoningEfforts.includes(value as ModelReasoningEffort);
+}
+
+function isSandboxMode(value: string): value is SandboxMode {
+  return sandboxModes.includes(value as SandboxMode);
 }

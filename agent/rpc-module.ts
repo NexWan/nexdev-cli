@@ -105,6 +105,10 @@ async function handleMessage(message: JsonObject): Promise<void> {
     reasoningEffort:
       stringParam(params, "reasoningEffort") ??
       stringParam(params, "reasoning_effort"),
+    sandboxMode:
+      stringParam(params, "sandboxMode") ??
+      stringParam(params, "sandbox_mode") ??
+      "workspace-write",
     workspaceDir: process.cwd(),
     systemInstruction,
     skipGitRepoCheck: true,
