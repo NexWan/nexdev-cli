@@ -45,6 +45,8 @@ const AgentTask = struct {
     environ_map: *const std.process.Environ.Map,
     npm_path: []u8,
     message_id: u64,
+    model: []u8,
+    reasoning_effort: []u8,
     text: []u8,
     history: []RpcChatMessage,
     thread: ?std.Thread = null,
@@ -56,6 +58,8 @@ const AgentTask = struct {
         environ_map: *const std.process.Environ.Map,
         npm_path: []const u8,
         message_id: u64,
+        model: []const u8,
+        reasoning_effort: []const u8,
         text: []const u8,
         history: []const RpcChatMessage,
     ) !*AgentTask {
@@ -67,6 +71,12 @@ const AgentTask = struct {
 
         const owned_npm_path = try allocator.dupe(u8, npm_path);
         errdefer allocator.free(owned_npm_path);
+
+        const owned_model = try allocator.dupe(u8, model);
+        errdefer allocator.free(owned_model);
+
+        const owned_reasoning_effort = try allocator.dupe(u8, reasoning_effort);
+        errdefer allocator.free(owned_reasoning_effort);
 
         const owned_history = try allocator.alloc(RpcChatMessage, history.len);
         errdefer allocator.free(owned_history);
@@ -91,6 +101,8 @@ const AgentTask = struct {
             .environ_map = environ_map,
             .npm_path = owned_npm_path,
             .message_id = message_id,
+            .model = owned_model,
+            .reasoning_effort = owned_reasoning_effort,
             .text = owned_text,
             .history = owned_history,
         };
@@ -123,6 +135,8 @@ const AgentTask = struct {
     fn freeOwned(self: *AgentTask) void {
         self.allocator.free(self.text);
         self.allocator.free(self.npm_path);
+        self.allocator.free(self.model);
+        self.allocator.free(self.reasoning_effort);
         for (self.history) |entry| {
             self.allocator.free(entry.content);
         }
@@ -139,6 +153,8 @@ const AgentTask = struct {
             self.environ_map,
             self.npm_path,
             self.message_id,
+            self.model,
+            self.reasoning_effort,
             self.text,
             self.history,
         ) catch |err| AgentTaskResult{
@@ -471,7 +487,16 @@ const Model = struct {
         };
         defer ctx.allocator.free(npm_path);
 
-        self.agent_task = AgentTask.start(std.heap.smp_allocator, ctx.environ_map, npm_path, assistant_id, user_text, history) catch {
+        self.agent_task = AgentTask.start(
+            std.heap.smp_allocator,
+            ctx.environ_map,
+            npm_path,
+            assistant_id,
+            self.active_model,
+            self.active_reasoning,
+            user_text,
+            history,
+        ) catch {
             self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Failed to start TypeScript RPC task" }) catch {};
             return .none;
         };
@@ -954,6 +979,8 @@ fn requestTypeScriptResponse(
     environ_map: *const std.process.Environ.Map,
     npm_path: []const u8,
     message_id: u64,
+    model: []const u8,
+    reasoning_effort: []const u8,
     text: []const u8,
     history: []const RpcChatMessage,
 ) !AgentTaskResult {
@@ -965,6 +992,8 @@ fn requestTypeScriptResponse(
     var conn = client.connection();
     try conn.sendRequest(.{ .integer = @intCast(message_id) }, "message.received", .{
         .message_id = message_id,
+        .model = model,
+        .reasoning_effort = reasoning_effort,
         .text = text,
         .messages = history,
     });
