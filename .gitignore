@@ -4,3 +4,4 @@ zig-out/
 .vscode/
 docs/
 node_modules/
+dist/

@@ -46,7 +46,8 @@ const AgentTaskResult = union(enum) {
 const AgentTask = struct {
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
-    npm_path: []u8,
+    node_path: []u8,
+    agent_entrypoint: []u8,
     message_id: u64,
     model: []u8,
     reasoning_effort: []u8,
@@ -60,7 +61,8 @@ const AgentTask = struct {
     fn start(
         allocator: std.mem.Allocator,
         environ_map: *const std.process.Environ.Map,
-        npm_path: []const u8,
+        node_path: []const u8,
+        agent_entrypoint: []const u8,
         message_id: u64,
         model: []const u8,
         reasoning_effort: []const u8,
@@ -74,8 +76,11 @@ const AgentTask = struct {
         const owned_text = try allocator.dupe(u8, text);
         errdefer allocator.free(owned_text);
 
-        const owned_npm_path = try allocator.dupe(u8, npm_path);
-        errdefer allocator.free(owned_npm_path);
+        const owned_node_path = try allocator.dupe(u8, node_path);
+        errdefer allocator.free(owned_node_path);
+
+        const owned_agent_entrypoint = try allocator.dupe(u8, agent_entrypoint);
+        errdefer allocator.free(owned_agent_entrypoint);
 
         const owned_model = try allocator.dupe(u8, model);
         errdefer allocator.free(owned_model);
@@ -107,7 +112,8 @@ const AgentTask = struct {
         task.* = .{
             .allocator = allocator,
             .environ_map = environ_map,
-            .npm_path = owned_npm_path,
+            .node_path = owned_node_path,
+            .agent_entrypoint = owned_agent_entrypoint,
             .message_id = message_id,
             .model = owned_model,
             .reasoning_effort = owned_reasoning_effort,
@@ -143,7 +149,8 @@ const AgentTask = struct {
 
     fn freeOwned(self: *AgentTask) void {
         self.allocator.free(self.text);
-        self.allocator.free(self.npm_path);
+        self.allocator.free(self.node_path);
+        self.allocator.free(self.agent_entrypoint);
         self.allocator.free(self.model);
         self.allocator.free(self.reasoning_effort);
         self.allocator.free(self.sandbox_mode);
@@ -161,7 +168,8 @@ const AgentTask = struct {
             self.allocator,
             io_instance.io(),
             self.environ_map,
-            self.npm_path,
+            self.node_path,
+            self.agent_entrypoint,
             self.message_id,
             self.model,
             self.reasoning_effort,
@@ -525,16 +533,23 @@ const Model = struct {
         };
         defer ctx.allocator.free(history);
 
-        const npm_path = resolveExecutable(ctx.allocator, ctx.io, ctx.environ_map, "npm") catch {
-            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Could not find npm in PATH" }) catch {};
+        const node_path = resolveExecutable(ctx.allocator, ctx.io, ctx.environ_map, "node") catch {
+            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Could not find node in PATH" }) catch {};
             return .none;
         };
-        defer ctx.allocator.free(npm_path);
+        defer ctx.allocator.free(node_path);
+
+        const agent_entrypoint = resolveAgentEntrypoint(ctx.allocator, ctx.io, ctx.environ_map) catch {
+            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Could not find bundled TypeScript agent runtime" }) catch {};
+            return .none;
+        };
+        defer ctx.allocator.free(agent_entrypoint);
 
         self.agent_task = AgentTask.start(
             std.heap.smp_allocator,
             ctx.environ_map,
-            npm_path,
+            node_path,
+            agent_entrypoint,
             assistant_id,
             self.active_model,
             self.active_reasoning,
@@ -1051,7 +1066,8 @@ fn requestTypeScriptResponse(
     allocator: std.mem.Allocator,
     io: std.Io,
     environ_map: *const std.process.Environ.Map,
-    npm_path: []const u8,
+    node_path: []const u8,
+    agent_entrypoint: []const u8,
     message_id: u64,
     model: []const u8,
     reasoning_effort: []const u8,
@@ -1059,7 +1075,7 @@ fn requestTypeScriptResponse(
     text: []const u8,
     history: []const RpcChatMessage,
 ) !AgentTaskResult {
-    var client = try rpc.SubprocessClient.init(allocator, io, &.{ npm_path, "run", "--silent", "agent:rpc" }, .{
+    var client = try rpc.SubprocessClient.init(allocator, io, &.{ node_path, "--experimental-strip-types", agent_entrypoint }, .{
         .environ_map = environ_map,
     });
     defer client.deinit();
@@ -1123,6 +1139,52 @@ fn resolveExecutable(
     }
 
     return error.FileNotFound;
+}
+
+fn resolveAgentEntrypoint(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+) ![]u8 {
+    if (environ_map.get("NEXDEV_CLI_AGENT_ENTRYPOINT")) |entrypoint| {
+        if (entrypoint.len > 0) return allocator.dupe(u8, entrypoint);
+    }
+
+    if (environ_map.get("NEXDEV_CLI_LIB_DIR")) |lib_dir| {
+        if (lib_dir.len > 0) {
+            const candidate = try std.fs.path.join(allocator, &.{ lib_dir, "agent", "rpc-module.ts" });
+            if (canAccessPath(io, candidate)) return candidate;
+            allocator.free(candidate);
+        }
+    }
+
+    const exe_dir = try std.process.executableDirPathAlloc(io, allocator);
+    defer allocator.free(exe_dir);
+
+    const installed_candidate = try std.fs.path.join(allocator, &.{ exe_dir, "..", "lib", "nexdev-cli", "agent", "rpc-module.ts" });
+    if (canAccessPath(io, installed_candidate)) return installed_candidate;
+    allocator.free(installed_candidate);
+
+    const portable_candidate = try std.fs.path.join(allocator, &.{ exe_dir, "agent", "rpc-module.ts" });
+    if (canAccessPath(io, portable_candidate)) return portable_candidate;
+    allocator.free(portable_candidate);
+
+    const dev_candidate = "agent/rpc-module.ts";
+    if (canAccessPath(io, dev_candidate)) {
+        return allocator.dupe(u8, dev_candidate);
+    }
+
+    return error.FileNotFound;
+}
+
+fn canAccessPath(io: std.Io, path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+        return true;
+    }
+
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
 }
 
 fn expectExitedZero(term: std.process.Child.Term) !void {
