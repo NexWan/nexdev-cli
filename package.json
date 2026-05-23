@@ -1,0 +1,18 @@
+{
+  "name": "nexdev-cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "agent:rpc": "node --experimental-strip-types agent/hello-rpc.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.133.0"
+  }
+}

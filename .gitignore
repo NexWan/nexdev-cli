@@ -3,3 +3,4 @@ zig-out/
 .zig-cache/
 .vscode/
 docs/
+node_modules/
