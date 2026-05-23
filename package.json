@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "agent:rpc": "node --experimental-strip-types agent/hello-rpc.ts"
+    "agent:rpc": "node --experimental-strip-types agent/rpc-module.ts"
   },
   "engines": {
     "node": ">=22.6"
