@@ -28,6 +28,132 @@ const RpcChatMessage = struct {
     content: []const u8,
 };
 
+const AgentTaskResult = union(enum) {
+    text: []u8,
+    failure: []u8,
+
+    fn deinit(self: AgentTaskResult, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .text => |value| allocator.free(value),
+            .failure => |value| allocator.free(value),
+        }
+    }
+};
+
+const AgentTask = struct {
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    npm_path: []u8,
+    message_id: u64,
+    text: []u8,
+    history: []RpcChatMessage,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    result: ?AgentTaskResult = null,
+
+    fn start(
+        allocator: std.mem.Allocator,
+        environ_map: *const std.process.Environ.Map,
+        npm_path: []const u8,
+        message_id: u64,
+        text: []const u8,
+        history: []const RpcChatMessage,
+    ) !*AgentTask {
+        const task = try allocator.create(AgentTask);
+        errdefer allocator.destroy(task);
+
+        const owned_text = try allocator.dupe(u8, text);
+        errdefer allocator.free(owned_text);
+
+        const owned_npm_path = try allocator.dupe(u8, npm_path);
+        errdefer allocator.free(owned_npm_path);
+
+        const owned_history = try allocator.alloc(RpcChatMessage, history.len);
+        errdefer allocator.free(owned_history);
+
+        var initialized: usize = 0;
+        errdefer {
+            for (owned_history[0..initialized]) |entry| {
+                allocator.free(entry.content);
+            }
+        }
+
+        for (history, 0..) |entry, index| {
+            owned_history[index] = .{
+                .role = entry.role,
+                .content = try allocator.dupe(u8, entry.content),
+            };
+            initialized += 1;
+        }
+
+        task.* = .{
+            .allocator = allocator,
+            .environ_map = environ_map,
+            .npm_path = owned_npm_path,
+            .message_id = message_id,
+            .text = owned_text,
+            .history = owned_history,
+        };
+        errdefer task.freeOwned();
+
+        task.thread = try std.Thread.spawn(.{}, run, .{task});
+        return task;
+    }
+
+    fn takeResult(self: *AgentTask) ?AgentTaskResult {
+        if (!self.done.load(.acquire)) return null;
+        const result = self.result orelse return null;
+        self.result = null;
+        return result;
+    }
+
+    fn deinit(self: *AgentTask) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        if (self.result) |result| {
+            result.deinit(self.allocator);
+            self.result = null;
+        }
+        self.freeOwned();
+        self.allocator.destroy(self);
+    }
+
+    fn freeOwned(self: *AgentTask) void {
+        self.allocator.free(self.text);
+        self.allocator.free(self.npm_path);
+        for (self.history) |entry| {
+            self.allocator.free(entry.content);
+        }
+        self.allocator.free(self.history);
+    }
+
+    fn run(self: *AgentTask) void {
+        var io_instance: std.Io.Threaded = .init(self.allocator, .{});
+        defer io_instance.deinit();
+
+        const task_result = requestTypeScriptResponse(
+            self.allocator,
+            io_instance.io(),
+            self.environ_map,
+            self.npm_path,
+            self.message_id,
+            self.text,
+            self.history,
+        ) catch |err| AgentTaskResult{
+            .failure = std.fmt.allocPrint(
+                self.allocator,
+                "RPC request failed: {s}",
+                .{@errorName(err)},
+            ) catch self.allocator.dupe(u8, "RPC request failed") catch unreachable,
+        };
+
+        self.result = task_result;
+        self.done.store(true, .release);
+    }
+};
+
 const Model = struct {
     allocator: std.mem.Allocator,
     messages: std.array_list.Managed(ChatMessage),
@@ -39,8 +165,10 @@ const Model = struct {
     next_id: u64,
     pending_response_id: ?u64,
     pending_response_text: ?[]u8,
+    agent_task: ?*AgentTask,
     status: []const u8,
     response_cursor: usize,
+    thinking_phase: u8,
 
     mode: UiMode,
     model_list: zz.List(ModelOption),
@@ -72,8 +200,10 @@ const Model = struct {
             .next_id = 1,
             .pending_response_id = null,
             .pending_response_text = null,
+            .agent_task = null,
             .status = "idle",
             .response_cursor = 0,
+            .thinking_phase = 0,
             .mode = .chat,
             .model_list = zz.List(ModelOption).init(allocator),
             .reasoning_list = zz.List(ReasoningOption).init(allocator),
@@ -101,6 +231,7 @@ const Model = struct {
         for (self.messages.items) |*message| {
             message.deinit(self.allocator);
         }
+        self.freeAgentTask();
         self.freePendingResponseText();
         self.messages.deinit();
         self.composer.deinit();
@@ -322,19 +453,30 @@ const Model = struct {
         };
 
         self.pending_response_id = assistant_id;
-        self.status = "Calling Python...";
+        self.status = "Calling TypeScript...";
         self.response_cursor = 0;
+        self.thinking_phase = 0;
         self.freePendingResponseText();
+        self.freeAgentTask();
 
-        const response_text = self.requestPythonResponse(ctx, assistant_id, user_text) catch {
+        const history = self.rpcHistory(ctx.allocator, assistant_id) catch {
             self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "RPC request failed" }) catch {};
             return .none;
         };
+        defer ctx.allocator.free(history);
 
-        self.pending_response_text = response_text;
+        const npm_path = resolveExecutable(ctx.allocator, ctx.io, ctx.environ_map, "npm") catch {
+            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Could not find npm in PATH" }) catch {};
+            return .none;
+        };
+        defer ctx.allocator.free(npm_path);
+
+        self.agent_task = AgentTask.start(std.heap.smp_allocator, ctx.environ_map, npm_path, assistant_id, user_text, history) catch {
+            self.applyAgentFailure(.{ .message_id = assistant_id, .reason = "Failed to start TypeScript RPC task" }) catch {};
+            return .none;
+        };
 
         self.composer.setValue("") catch {};
-        self.status = "Thinking...";
         self.rebuildTranscript() catch {};
         self.transcript.gotoBottom();
 
@@ -348,7 +490,9 @@ const Model = struct {
         self.messages.clearRetainingCapacity();
         self.pending_response_id = null;
         self.freePendingResponseText();
+        self.freeAgentTask();
         self.response_cursor = 0;
+        self.thinking_phase = 0;
         self.mode = .chat;
         self.show_commands = false;
         self.composer.setValue("") catch {};
@@ -357,7 +501,33 @@ const Model = struct {
 
     fn pollAgent(self: *Model) zz.Cmd(Msg) {
         const response_id = self.pending_response_id orelse return .none;
-        const response_text = self.pending_response_text orelse return .none;
+        const response_text = self.pending_response_text orelse {
+            const task = self.agent_task orelse return .none;
+            const task_result = task.takeResult() orelse {
+                self.updateThinkingPlaceholder(response_id) catch {};
+                return zz.Cmd(Msg).everyMs(100);
+            };
+            defer task_result.deinit(task.allocator);
+            defer self.freeAgentTask();
+
+            switch (task_result) {
+                .text => |text| {
+                    self.replaceMessageText(response_id, "") catch {};
+                    self.pending_response_text = self.allocator.dupe(u8, text) catch {
+                        self.applyAgentFailure(.{ .message_id = response_id, .reason = "Out of memory" }) catch {};
+                        return .none;
+                    };
+                    self.status = "streaming";
+                },
+                .failure => |reason| {
+                    self.replaceMessageText(response_id, "") catch {};
+                    self.applyAgentFailure(.{ .message_id = response_id, .reason = reason }) catch {};
+                    return .none;
+                },
+            }
+
+            return zz.Cmd(Msg).everyMs(50);
+        };
 
         if (self.response_cursor >= response_text.len) {
             return zz.Cmd(Msg).send(.{ .agent_done = .{ .message_id = response_id } });
@@ -394,36 +564,6 @@ const Model = struct {
         self.transcript.gotoBottom();
     }
 
-    fn requestPythonResponse(self: *Model, ctx: *const zz.Context, message_id: u64, text: []const u8) ![]u8 {
-        var client = try rpc.SubprocessClient.init(ctx.allocator, ctx.io, &.{ "python3", "./mod/test.py" }, .{});
-        defer client.deinit();
-
-        const history = try self.rpcHistory(ctx.allocator, message_id);
-        defer ctx.allocator.free(history);
-
-        var conn = client.connection();
-        try conn.sendRequest(.{ .integer = @intCast(message_id) }, "message.received", .{
-            .message_id = message_id,
-            .text = text,
-            .messages = history,
-        });
-        try client.closeInput();
-
-        var response_message = try conn.readMessage();
-        defer response_message.deinit();
-
-        const response = try response_message.asResponse();
-        if (response.rpc_error != null) {
-            return error.RpcPeerError;
-        }
-
-        const response_text = try response.asText();
-        const owned_text = try self.allocator.dupe(u8, response_text);
-        errdefer self.allocator.free(owned_text);
-        try expectExitedZero(try client.wait());
-        return owned_text;
-    }
-
     fn rpcHistory(self: *const Model, allocator: std.mem.Allocator, pending_message_id: u64) ![]RpcChatMessage {
         var count: usize = 0;
         for (self.messages.items) |msg| {
@@ -448,13 +588,6 @@ const Model = struct {
         return history;
     }
 
-    fn expectExitedZero(term: std.process.Child.Term) !void {
-        switch (term) {
-            .exited => |code| if (code == 0) return else return error.ChildExitedNonZero,
-            else => return error.ChildDidNotExitNormally,
-        }
-    }
-
     fn rpcRoleName(role: app.Role) []const u8 {
         return switch (role) {
             .user => "user",
@@ -469,6 +602,41 @@ const Model = struct {
             self.allocator.free(text);
             self.pending_response_text = null;
         }
+    }
+
+    fn freeAgentTask(self: *Model) void {
+        if (self.agent_task) |task| {
+            task.deinit();
+            self.agent_task = null;
+        }
+    }
+
+    fn replaceMessageText(self: *Model, message_id: u64, text: []const u8) !void {
+        for (self.messages.items) |*msg| {
+            if (msg.id == message_id) {
+                const old = msg.text;
+                msg.text = try self.allocator.dupe(u8, text);
+                self.allocator.free(old);
+                return;
+            }
+        }
+    }
+
+    fn updateThinkingPlaceholder(self: *Model, message_id: u64) !void {
+        const frames = [_][]const u8{
+            "Thinking.",
+            "Thinking..",
+            "Thinking...",
+            "Thinking....",
+        };
+        const frame_index = (@as(usize, self.thinking_phase) / 2) % frames.len;
+        self.thinking_phase +%= 1;
+        const frame = frames[frame_index];
+
+        try self.replaceMessageText(message_id, frame);
+        self.status = frame;
+        try self.rebuildTranscript();
+        self.transcript.gotoBottom();
     }
 
     fn applyAgentFailure(self: *Model, failed: AgentFailed) !void {
@@ -779,6 +947,85 @@ const Model = struct {
         self.composer.setWidth(width -| 2);
     }
 };
+
+fn requestTypeScriptResponse(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    npm_path: []const u8,
+    message_id: u64,
+    text: []const u8,
+    history: []const RpcChatMessage,
+) !AgentTaskResult {
+    var client = try rpc.SubprocessClient.init(allocator, io, &.{ npm_path, "run", "--silent", "agent:rpc" }, .{
+        .environ_map = environ_map,
+    });
+    defer client.deinit();
+
+    var conn = client.connection();
+    try conn.sendRequest(.{ .integer = @intCast(message_id) }, "message.received", .{
+        .message_id = message_id,
+        .text = text,
+        .messages = history,
+    });
+    try client.closeInput();
+
+    var response_message = try conn.readMessage();
+    defer response_message.deinit();
+
+    const response = try response_message.asResponse();
+    if (response.rpc_error) |rpc_error| {
+        const owned_error = try allocator.dupe(u8, rpc_error.message);
+        errdefer allocator.free(owned_error);
+        try expectExitedZero(try client.wait());
+        return .{ .failure = owned_error };
+    }
+
+    const response_text = try response.asText();
+    const owned_text = try allocator.dupe(u8, response_text);
+    errdefer allocator.free(owned_text);
+    try expectExitedZero(try client.wait());
+    return .{ .text = owned_text };
+}
+
+fn resolveExecutable(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    name: []const u8,
+) ![]u8 {
+    for (name) |char| {
+        if (char == '/') return allocator.dupe(u8, name);
+    }
+
+    const path_value = environ_map.get("PATH") orelse return error.FileNotFound;
+    var path_iter = std.mem.splitScalar(u8, path_value, ':');
+    while (path_iter.next()) |dir| {
+        if (dir.len == 0) continue;
+
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+        errdefer allocator.free(candidate);
+
+        std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true }) catch |err| switch (err) {
+            error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.BadPathName => {
+                allocator.free(candidate);
+                continue;
+            },
+            else => return err,
+        };
+
+        return candidate;
+    }
+
+    return error.FileNotFound;
+}
+
+fn expectExitedZero(term: std.process.Child.Term) !void {
+    switch (term) {
+        .exited => |code| if (code == 0) return else return error.ChildExitedNonZero,
+        else => return error.ChildDidNotExitNormally,
+    }
+}
 
 fn headerHeight(height: u16) u16 {
     return if (height > logo_header_height + footer_height)
