@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${VERSION:-$(node -p "require('./package.json').version")}"
+REPOSITORY="${REPOSITORY:-${GITHUB_REPOSITORY:-NexWan/nexdev-cli}}"
 TARGET_NAME="${TARGET_NAME:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/dist}"
 ARCHIVE_NAME="nexdev-cli-${VERSION}-${TARGET_NAME}"
@@ -28,7 +29,16 @@ chmod 755 "$STAGE_DIR/install.sh"
 cat > "$STAGE_DIR/README.txt" <<EOF
 nexdev-cli ${VERSION}
 
+Download this archive from GitHub:
+  curl -L -o ${ARCHIVE_NAME}.tar.gz \\
+    https://github.com/${REPOSITORY}/releases/download/${VERSION}/${ARCHIVE_NAME}.tar.gz
+
+  wget -O ${ARCHIVE_NAME}.tar.gz \\
+    https://github.com/${REPOSITORY}/releases/download/${VERSION}/${ARCHIVE_NAME}.tar.gz
+
 Install:
+  tar -xzf ${ARCHIVE_NAME}.tar.gz
+  cd ${ARCHIVE_NAME}
   ./install.sh
 
 Override install locations:

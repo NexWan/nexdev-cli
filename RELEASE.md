@@ -22,7 +22,28 @@ version label such as `v0.1.0`.
 Download the archive for your OS, unpack it, then run:
 
 ```sh
+tar -xzf nexdev-cli-v0.1.0-linux-x64.tar.gz
+cd nexdev-cli-v0.1.0-linux-x64
 ./install.sh
+```
+
+The GitHub Release page includes copyable `curl` and `wget` commands. The
+general form is:
+
+```sh
+VERSION="v0.1.0"
+TARGET="linux-x64"
+curl -L -o "nexdev-cli-${VERSION}-${TARGET}.tar.gz" \
+  "https://github.com/NexWan/nexdev-cli/releases/download/${VERSION}/nexdev-cli-${VERSION}-${TARGET}.tar.gz"
+```
+
+Or with `wget`:
+
+```sh
+VERSION="v0.1.0"
+TARGET="linux-x64"
+wget -O "nexdev-cli-${VERSION}-${TARGET}.tar.gz" \
+  "https://github.com/NexWan/nexdev-cli/releases/download/${VERSION}/nexdev-cli-${VERSION}-${TARGET}.tar.gz"
 ```
 
 The installer writes:
