@@ -80,7 +80,7 @@ Runtime requirements:
 EOF
 
 mkdir -p "$OUT_DIR"
-tar -czf "$OUT_DIR/$ARCHIVE_NAME.tar.gz" -C "$OUT_DIR/stage" "$ARCHIVE_NAME"
+(cd "$OUT_DIR" && tar -czf "$ARCHIVE_NAME.tar.gz" -C "stage" "$ARCHIVE_NAME")
 
 if command -v shasum >/dev/null 2>&1; then
   (cd "$OUT_DIR" && shasum -a 256 "$ARCHIVE_NAME.tar.gz" > "$ARCHIVE_NAME.tar.gz.sha256")
