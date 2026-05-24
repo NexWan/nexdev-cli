@@ -35,6 +35,21 @@ const RpcChatMessage = struct {
     content: []const u8,
 };
 
+const AgentDraft = struct {
+    name: ?[]u8 = null,
+    description: ?[]u8 = null,
+    behavior: ?[]u8 = null,
+    model: ?[]u8 = null,
+
+    fn deinit(self: *AgentDraft, allocator: std.mem.Allocator) void {
+        if (self.name) |value| allocator.free(value);
+        if (self.description) |value| allocator.free(value);
+        if (self.behavior) |value| allocator.free(value);
+        if (self.model) |value| allocator.free(value);
+        self.* = .{};
+    }
+};
+
 const AgentTaskResult = union(enum) {
     text: []u8,
     failure: []u8,
@@ -197,6 +212,7 @@ const Model = struct {
     allocator: std.mem.Allocator,
     messages: std.array_list.Managed(ChatMessage),
     composer: zz.TextInput,
+    behavior_text: zz.TextArea,
     transcript: zz.Viewport,
     header_height: u16,
     show_commands: bool,
@@ -218,9 +234,11 @@ const Model = struct {
     active_reasoning: []const u8,
     active_sandbox: []const u8,
     active_agent_action: []const u8,
+    agent_draft: AgentDraft,
 
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
+        paste: []const u8,
         mouse: zz.MouseEvent,
         window_size: zz.msg.WindowSize,
         tick: zz.msg.Tick,
@@ -237,6 +255,7 @@ const Model = struct {
             .allocator = allocator,
             .messages = std.array_list.Managed(ChatMessage).init(allocator),
             .composer = zz.TextInput.init(allocator),
+            .behavior_text = zz.TextArea.init(allocator),
             .transcript = zz.Viewport.init(allocator, ctx.width, transcriptHeight(ctx.height)),
             .header_height = headerHeight(ctx.height),
             .show_commands = false,
@@ -256,6 +275,7 @@ const Model = struct {
             .active_reasoning = reasoningOptionLabel(.medium),
             .active_sandbox = sandboxOptionLabel(.workspace_write),
             .active_agent_action = "none",
+            .agent_draft = .{},
         };
         self.composer.setPrompt("> ");
         self.composer.setPlaceholder("Type your message...");
@@ -263,6 +283,12 @@ const Model = struct {
         self.composer.prompt_style = self.composer.prompt_style.fg(.green).bold(true);
         self.composer.placeholder_style = self.composer.placeholder_style.fg(.green).bold(true);
         self.composer.cursor_style = self.composer.cursor_style.fg(.black).bg(.green).bold(true);
+        self.behavior_text.placeholder = "Paste or type behavior. Ctrl+Enter continues.";
+        self.behavior_text.word_wrap = true;
+        self.behavior_text.text_style = self.behavior_text.text_style.fg(.green);
+        self.behavior_text.placeholder_style = self.behavior_text.placeholder_style.fg(.gray(10));
+        self.behavior_text.cursor_style = self.behavior_text.cursor_style.fg(.black).bg(.green).bold(true);
+        self.behavior_text.blur();
 
         self.transcript.setWrap(true);
         self.transcript.setShowScrollbar(true);
@@ -280,8 +306,10 @@ const Model = struct {
         }
         self.freeAgentTask();
         self.freePendingResponseText();
+        self.agent_draft.deinit(self.allocator);
         self.messages.deinit();
         self.composer.deinit();
+        self.behavior_text.deinit();
         self.transcript.deinit();
         self.model_list.deinit();
         self.reasoning_list.deinit();
@@ -292,6 +320,7 @@ const Model = struct {
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (msg) {
             .key => |key| return self.handleKey(key, ctx),
+            .paste => |text| return self.handlePaste(text),
             .mouse => |mouse| return self.handleMouse(mouse),
             .window_size => |size| {
                 self.resize(size.width, size.height);
@@ -354,7 +383,31 @@ const Model = struct {
             .select_reasoning => self.handleReasoningSelectionKey(key),
             .select_sandbox => self.handleSandboxSelectionKey(key),
             .select_agents => self.handleAgentSelectionKey(key),
+            .create_agent_name, .create_agent_description, .create_agent_behavior, .create_agent_model => self.handleAgentWizardKey(key, ctx),
         };
+    }
+
+    fn handlePaste(self: *Model, text: []const u8) zz.Cmd(Msg) {
+        const paste_key = zz.KeyEvent{ .key = .{ .paste = text } };
+
+        switch (self.mode) {
+            .chat => {
+                self.composer.handleKey(paste_key);
+                const value = self.composer.getValue();
+                self.show_commands = std.mem.startsWith(u8, value, "/");
+            },
+            .create_agent_name, .create_agent_description, .create_agent_model => {
+                self.composer.handleKey(paste_key);
+                self.show_commands = false;
+            },
+            .create_agent_behavior => {
+                self.behavior_text.handleKey(paste_key);
+                self.show_commands = false;
+            },
+            else => {},
+        }
+
+        return .none;
     }
 
     fn handleChatKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -452,13 +505,63 @@ const Model = struct {
             .enter => {
                 if (self.agent_list.selectedValue()) |value| {
                     self.active_agent_action = agentOptionLabel(value);
-                    self.mode = .chat;
-                    self.status = agentSelectionStatus(value);
+                    switch (value) {
+                        .create => self.startAgentCreation(),
+                        .list, .view => {
+                            self.mode = .chat;
+                            self.status = agentSelectionStatus(value);
+                        },
+                    }
                 }
                 return .none;
             },
             else => {
                 self.agent_list.handleKey(key);
+                return .none;
+            },
+        }
+    }
+
+    fn handleAgentWizardKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
+        if (self.mode == .create_agent_behavior) {
+            return self.handleAgentBehaviorKey(key, ctx);
+        }
+
+        switch (key.key) {
+            .escape => {
+                self.cancelAgentCreation();
+                return .none;
+            },
+            .enter => return self.submitAgentWizardStep(ctx),
+            else => {
+                self.composer.handleKey(key);
+                self.show_commands = false;
+                return .none;
+            },
+        }
+    }
+
+    fn handleAgentBehaviorKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
+        if (key.modifiers.ctrl and key.key.eql(.{ .char = 'd' })) {
+            return self.submitAgentWizardStep(ctx);
+        }
+
+        switch (key.key) {
+            .escape => {
+                self.cancelAgentCreation();
+                return .none;
+            },
+            .enter => {
+                if (key.modifiers.ctrl) {
+                    return self.submitAgentWizardStep(ctx);
+                }
+
+                self.behavior_text.handleKey(key);
+                return .none;
+            },
+            else => {
+                self.behavior_text.handleKey(key);
+                self.show_commands = false;
                 return .none;
             },
         }
@@ -618,6 +721,10 @@ const Model = struct {
         self.mode = .chat;
         self.show_commands = false;
         self.composer.setValue("") catch {};
+        self.composer.setPlaceholder("Type your message...");
+        self.behavior_text.setValue("") catch {};
+        self.behavior_text.blur();
+        self.agent_draft.deinit(self.allocator);
         self.transcript.setContent("") catch {};
     }
 
@@ -827,10 +934,8 @@ const Model = struct {
         const pink = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
         const dim = (zz.Style{}).fg(.gray(10));
 
-        const separator = dim.render(
-            allocator,
-            "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll",
-        ) catch "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll";
+        const separator_text = modeFooterText(self.mode);
+        const separator = dim.render(allocator, separator_text) catch separator_text;
 
         const center_view = switch (self.mode) {
             .chat => transcript_view,
@@ -862,8 +967,15 @@ const Model = struct {
                 self.active_agent_action,
                 self.agent_list.view(allocator) catch "",
             ) catch transcript_view,
+            .create_agent_name, .create_agent_description, .create_agent_behavior, .create_agent_model => self.renderAgentWizardPanel(
+                allocator,
+                ctx.width,
+            ) catch transcript_view,
         };
-        const input_line = green.render(allocator, composer_view) catch composer_view;
+        const input_line = if (self.mode == .create_agent_behavior)
+            ""
+        else
+            green.render(allocator, composer_view) catch composer_view;
         const slash_popup = if (self.show_commands)
             self.renderSlashCommandPopup(allocator) catch ""
         else
@@ -958,6 +1070,78 @@ const Model = struct {
             .render(allocator, content) catch content;
 
         return zz.place.place(allocator, width, 10, .center, .middle, panel);
+    }
+
+    fn renderAgentWizardPanel(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        width: u16,
+    ) ![]const u8 {
+        const green = (zz.Style{}).fg(.green).bold(true);
+        const dim = (zz.Style{}).fg(.gray(10));
+
+        const title_view = try green.render(allocator, "Create Agent");
+        const step_view = try dim.render(allocator, agentWizardStepLabel(self.mode));
+        const prompt_view = try std.fmt.allocPrint(allocator, "{s}: {s}", .{
+            agentWizardFieldLabel(self.mode),
+            agentWizardPrompt(self.mode),
+        });
+        const name_view = try std.fmt.allocPrint(allocator, "Name: {s}", .{self.agent_draft.name orelse "(not set)"});
+        const description_view = try std.fmt.allocPrint(allocator, "Description: {s}", .{self.agent_draft.description orelse "(not set)"});
+        const behavior_view = if (self.agent_draft.behavior) |behavior|
+            try std.fmt.allocPrint(allocator, "Behavior: {d} chars", .{behavior.len})
+        else
+            try std.fmt.allocPrint(allocator, "Behavior: {s}", .{"(not set)"});
+        const model_view = try std.fmt.allocPrint(allocator, "Model: {s}", .{self.agent_draft.model orelse "(not set)"});
+        const help_view = try dim.render(allocator, agentWizardHelp(self.mode));
+
+        const content = if (self.mode == .create_agent_behavior) blk: {
+            const editor_view = try self.behavior_text.view(allocator);
+            break :blk try zz.join.vertical(
+                allocator,
+                .left,
+                &.{
+                    title_view,
+                    step_view,
+                    "",
+                    prompt_view,
+                    "",
+                    name_view,
+                    description_view,
+                    behavior_view,
+                    model_view,
+                    "",
+                    editor_view,
+                    "",
+                    help_view,
+                },
+            );
+        } else try zz.join.vertical(
+            allocator,
+            .left,
+            &.{
+                title_view,
+                step_view,
+                "",
+                prompt_view,
+                "",
+                name_view,
+                description_view,
+                behavior_view,
+                model_view,
+                "",
+                help_view,
+            },
+        );
+
+        const panel = (zz.Style{})
+            .borderAll(.rounded)
+            .borderForeground(.green)
+            .paddingAll(1)
+            .width(72)
+            .render(allocator, content) catch content;
+
+        return zz.place.place(allocator, width, agentWizardPanelHeight(self.mode), .center, .middle, panel);
     }
 
     fn renderSlashCommandPopup(self: *const Model, allocator: std.mem.Allocator) ![]const u8 {
@@ -1121,10 +1305,155 @@ const Model = struct {
         self.agent_list.selectCurrent();
     }
 
+    fn startAgentCreation(self: *Model) void {
+        self.agent_draft.deinit(self.allocator);
+        self.mode = .create_agent_name;
+        self.status = "enter agent name";
+        self.show_commands = false;
+        self.composer.setValue("") catch {};
+        self.composer.setPlaceholder("Agent name");
+        self.behavior_text.setValue("") catch {};
+        self.behavior_text.blur();
+    }
+
+    fn cancelAgentCreation(self: *Model) void {
+        self.agent_draft.deinit(self.allocator);
+        self.mode = .chat;
+        self.status = "agent creation canceled";
+        self.composer.setValue("") catch {};
+        self.composer.setPlaceholder("Type your message...");
+        self.behavior_text.setValue("") catch {};
+        self.behavior_text.blur();
+    }
+
+    fn submitAgentWizardStep(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
+        if (self.mode == .create_agent_behavior) {
+            return self.submitAgentBehaviorStep();
+        }
+
+        const raw = self.composer.getValue();
+        const trimmed = std.mem.trim(u8, raw, " \t\n\r");
+        if (trimmed.len == 0) {
+            self.status = agentWizardRequiredStatus(self.mode);
+            return .none;
+        }
+
+        switch (self.mode) {
+            .create_agent_name => {
+                self.replaceAgentDraftField(&self.agent_draft.name, trimmed) catch {
+                    self.status = "failed to save agent name";
+                    return .none;
+                };
+                self.mode = .create_agent_description;
+                self.status = "enter agent description";
+                self.composer.setValue("") catch {};
+                self.composer.setPlaceholder("Agent description");
+            },
+            .create_agent_description => {
+                self.replaceAgentDraftField(&self.agent_draft.description, trimmed) catch {
+                    self.status = "failed to save description";
+                    return .none;
+                };
+                self.mode = .create_agent_behavior;
+                self.status = "enter agent behavior";
+                self.composer.setValue("") catch {};
+                self.behavior_text.setValue("") catch {};
+                self.behavior_text.focus();
+            },
+            .create_agent_model => {
+                if (!isKnownModelLabel(trimmed)) {
+                    self.status = "unknown agent model";
+                    return .none;
+                }
+
+                self.replaceAgentDraftField(&self.agent_draft.model, trimmed) catch {
+                    self.status = "failed to save model";
+                    return .none;
+                };
+
+                const saved_path = saveAgentDraft(
+                    self.allocator,
+                    ctx.io,
+                    ctx.environ_map,
+                    self.agent_draft,
+                ) catch {
+                    self.status = "failed to persist agent";
+                    return .none;
+                };
+                defer self.allocator.free(saved_path);
+
+                self.appendSystemNotice(
+                    "Created agent \"{s}\".\nSaved to: {s}",
+                    .{ self.agent_draft.name.?, saved_path },
+                ) catch {};
+                self.agent_draft.deinit(self.allocator);
+                self.mode = .chat;
+                self.status = "agent created";
+                self.composer.setValue("") catch {};
+                self.composer.setPlaceholder("Type your message...");
+                self.behavior_text.setValue("") catch {};
+                self.behavior_text.blur();
+                self.rebuildTranscript() catch {};
+                self.transcript.gotoBottom();
+            },
+            else => {},
+        }
+
+        return .none;
+    }
+
+    fn submitAgentBehaviorStep(self: *Model) zz.Cmd(Msg) {
+        const raw = self.behavior_text.getValue(self.allocator) catch {
+            self.status = "failed to read behavior";
+            return .none;
+        };
+        defer self.allocator.free(raw);
+
+        const trimmed = std.mem.trim(u8, raw, " \t\n\r");
+        if (trimmed.len == 0) {
+            self.status = agentWizardRequiredStatus(self.mode);
+            return .none;
+        }
+
+        self.replaceAgentDraftField(&self.agent_draft.behavior, trimmed) catch {
+            self.status = "failed to save behavior";
+            return .none;
+        };
+        self.mode = .create_agent_model;
+        self.status = "enter agent model";
+        self.composer.setValue("") catch {};
+        self.composer.setPlaceholder(self.active_model);
+        self.behavior_text.setValue("") catch {};
+        self.behavior_text.blur();
+
+        return .none;
+    }
+
+    fn replaceAgentDraftField(self: *Model, field: *?[]u8, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        if (field.*) |old| self.allocator.free(old);
+        field.* = owned;
+    }
+
+    fn appendSystemNotice(self: *Model, comptime fmt: []const u8, args: anytype) !void {
+        const text = try std.fmt.allocPrint(self.allocator, fmt, args);
+        errdefer self.allocator.free(text);
+
+        const id = self.next_id;
+        self.next_id += 1;
+        try self.messages.append(.{
+            .id = id,
+            .role = .system,
+            .text = text,
+            .state = .complete,
+        });
+    }
+
     pub fn resize(self: *Model, width: u16, height: u16) void {
         self.header_height = headerHeight(height);
         self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
+        self.behavior_text.setSize(agentBehaviorEditorWidth(width), agentBehaviorEditorHeight(height));
     }
 };
 
@@ -1134,6 +1463,242 @@ fn agentSelectionStatus(option: AgentOption) []const u8 {
         .list => "agent list selected",
         .view => "agent view selected",
     };
+}
+
+fn modeFooterText(mode: UiMode) []const u8 {
+    return switch (mode) {
+        .chat => "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll",
+        .select_model, .select_reasoning, .select_sandbox, .select_agents => "Enter selects | Esc cancels",
+        .create_agent_behavior => "Enter inserts newline | Ctrl+D or Ctrl+Enter continues | Esc cancels",
+        .create_agent_name, .create_agent_description, .create_agent_model => "Enter continues | Esc cancels",
+    };
+}
+
+fn agentWizardStepLabel(mode: UiMode) []const u8 {
+    return switch (mode) {
+        .create_agent_name => "Step 1 of 4",
+        .create_agent_description => "Step 2 of 4",
+        .create_agent_behavior => "Step 3 of 4",
+        .create_agent_model => "Step 4 of 4",
+        else => "",
+    };
+}
+
+fn agentWizardFieldLabel(mode: UiMode) []const u8 {
+    return switch (mode) {
+        .create_agent_name => "Name",
+        .create_agent_description => "Description",
+        .create_agent_behavior => "Behavior",
+        .create_agent_model => "Model",
+        else => "",
+    };
+}
+
+fn agentWizardPrompt(mode: UiMode) []const u8 {
+    return switch (mode) {
+        .create_agent_name => "Enter a short display name for this agent",
+        .create_agent_description => "Describe when this agent should be used",
+        .create_agent_behavior => "Describe how this agent should behave",
+        .create_agent_model => "Enter the model this agent should use",
+        else => "",
+    };
+}
+
+fn agentWizardRequiredStatus(mode: UiMode) []const u8 {
+    return switch (mode) {
+        .create_agent_name => "agent name is required",
+        .create_agent_description => "agent description is required",
+        .create_agent_behavior => "agent behavior is required",
+        .create_agent_model => "agent model is required",
+        else => "value is required",
+    };
+}
+
+fn isKnownModelLabel(value: []const u8) bool {
+    inline for (std.meta.fields(ModelOption)) |field| {
+        const option: ModelOption = @enumFromInt(field.value);
+        if (std.mem.eql(u8, modelOptionLabel(option), value)) return true;
+    }
+    return false;
+}
+
+fn agentWizardHelp(mode: UiMode) []const u8 {
+    return if (mode == .create_agent_behavior)
+        "Enter inserts newline | Ctrl+D or Ctrl+Enter continues | Esc cancels"
+    else
+        "Enter continues | Esc cancels";
+}
+
+fn agentWizardPanelHeight(mode: UiMode) u16 {
+    return if (mode == .create_agent_behavior) 24 else 14;
+}
+
+fn agentBehaviorEditorWidth(width: u16) u16 {
+    var editor_width = width -| 8;
+    if (editor_width > 68) editor_width = 68;
+    if (editor_width < 20) editor_width = 20;
+    return editor_width;
+}
+
+fn agentBehaviorEditorHeight(height: u16) u16 {
+    var editor_height = height / 3;
+    if (editor_height > 12) editor_height = 12;
+    if (editor_height < 8) editor_height = 8;
+    return editor_height;
+}
+
+fn saveAgentDraft(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    draft: AgentDraft,
+) ![]u8 {
+    const name = draft.name orelse return error.MissingAgentName;
+    const description = draft.description orelse return error.MissingAgentDescription;
+    const behavior = draft.behavior orelse return error.MissingAgentBehavior;
+    const model = draft.model orelse return error.MissingAgentModel;
+
+    const data_dir = try resolveAppDataDir(allocator, environ_map);
+    defer allocator.free(data_dir);
+
+    const agents_dir = try std.fs.path.join(allocator, &.{ data_dir, "agents" });
+    defer allocator.free(agents_dir);
+
+    try std.Io.Dir.cwd().createDirPath(io, agents_dir);
+
+    const slug = try agentFileSlug(allocator, name);
+    defer allocator.free(slug);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    const writer = &out.writer;
+    try std.json.Stringify.value(.{
+        .version = 1,
+        .name = name,
+        .description = description,
+        .behavior = behavior,
+        .model = model,
+    }, .{ .whitespace = .indent_2 }, writer);
+    try writer.writeByte('\n');
+
+    const json_bytes = try out.toOwnedSlice();
+    defer allocator.free(json_bytes);
+
+    return writeUniqueAgentFile(allocator, io, agents_dir, slug, json_bytes);
+}
+
+fn resolveAppDataDir(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+) ![]u8 {
+    if (environ_map.get("NEXDEV_CLI_DATA_DIR")) |data_dir| {
+        if (data_dir.len > 0) return allocator.dupe(u8, data_dir);
+    }
+
+    if (builtin.os.tag == .windows) {
+        if (environ_map.get("LOCALAPPDATA")) |local_app_data| {
+            if (local_app_data.len > 0) {
+                return std.fs.path.join(allocator, &.{ local_app_data, "nexdev-cli" });
+            }
+        }
+
+        const home = environ_map.get("HOME") orelse environ_map.get("USERPROFILE") orelse return error.MissingHomeDirectory;
+        return std.fs.path.join(allocator, &.{ home, "AppData", "Local", "nexdev-cli" });
+    }
+
+    const home = environ_map.get("HOME") orelse return error.MissingHomeDirectory;
+    if (builtin.os.tag == .macos) {
+        return std.fs.path.join(allocator, &.{ home, "Library", "Application Support", "nexdev-cli" });
+    }
+
+    if (environ_map.get("XDG_DATA_HOME")) |data_home| {
+        if (data_home.len > 0) {
+            return std.fs.path.join(allocator, &.{ data_home, "nexdev-cli" });
+        }
+    }
+
+    return std.fs.path.join(allocator, &.{ home, ".local", "share", "nexdev-cli" });
+}
+
+fn agentFileSlug(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    const writer = &out.writer;
+    var previous_dash = false;
+
+    for (name) |char| {
+        if (std.ascii.isAlphanumeric(char)) {
+            try writer.writeByte(std.ascii.toLower(char));
+            previous_dash = false;
+            continue;
+        }
+
+        if (!previous_dash and out.written().len > 0) {
+            try writer.writeByte('-');
+            previous_dash = true;
+        }
+    }
+
+    while (out.written().len > 0 and out.written()[out.written().len - 1] == '-') {
+        out.shrinkRetainingCapacity(out.written().len - 1);
+    }
+
+    if (out.written().len == 0) {
+        try writer.writeAll("agent");
+    }
+
+    return out.toOwnedSlice();
+}
+
+fn writeUniqueAgentFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    agents_dir: []const u8,
+    slug: []const u8,
+    json_bytes: []const u8,
+) ![]u8 {
+    var index: usize = 0;
+    while (index < 1000) : (index += 1) {
+        const filename = if (index == 0)
+            try std.fmt.allocPrint(allocator, "{s}.json", .{slug})
+        else
+            try std.fmt.allocPrint(allocator, "{s}-{d}.json", .{ slug, index + 1 });
+        defer allocator.free(filename);
+
+        const path = try std.fs.path.join(allocator, &.{ agents_dir, filename });
+        errdefer allocator.free(path);
+
+        std.Io.Dir.cwd().writeFile(io, .{
+            .sub_path = path,
+            .data = json_bytes,
+            .flags = .{ .exclusive = true },
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                allocator.free(path);
+                continue;
+            },
+            else => return err,
+        };
+
+        return path;
+    }
+
+    return error.TooManyAgentFiles;
+}
+
+test "agent file slug normalizes names" {
+    const allocator = std.testing.allocator;
+
+    const slug = try agentFileSlug(allocator, "  Research Agent!  ");
+    defer allocator.free(slug);
+    try std.testing.expectEqualStrings("research-agent", slug);
+
+    const fallback = try agentFileSlug(allocator, "!!!");
+    defer allocator.free(fallback);
+    try std.testing.expectEqualStrings("agent", fallback);
+}
+
+test "agent model validation rejects pasted headings" {
+    try std.testing.expect(isKnownModelLabel("GPT-5.5"));
+    try std.testing.expect(!isKnownModelLabel("## Primary Responsibilities"));
 }
 
 fn requestTypeScriptResponse(

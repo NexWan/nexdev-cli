@@ -21,7 +21,17 @@ pub const AgentDone = struct { message_id: u64 };
 
 pub const AgentFailed = struct { message_id: u64, reason: []const u8 };
 
-pub const UiMode = enum { chat, select_model, select_reasoning, select_sandbox, select_agents };
+pub const UiMode = enum {
+    chat,
+    select_model,
+    select_reasoning,
+    select_sandbox,
+    select_agents,
+    create_agent_name,
+    create_agent_description,
+    create_agent_behavior,
+    create_agent_model,
+};
 
 pub const ModelOption = enum {
     gpt_5_5,
