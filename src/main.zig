@@ -12,6 +12,7 @@ const UiMode = app.UiMode;
 const ModelOption = app.ModelOption;
 const ReasoningOption = app.ReasoningOption;
 const SandboxOption = app.SandboxOption;
+const AgentOption = app.AgentOption;
 const logo = app.logo;
 const slash_commands = app.slash_commands;
 const modelOptionLabel = app.modelOptionLabel;
@@ -20,6 +21,8 @@ const reasoningOptionLabel = app.reasoningOptionLabel;
 const reasoningOptionDescription = app.reasoningOptionDescription;
 const sandboxOptionLabel = app.sandboxOptionLabel;
 const sandboxOptionDescription = app.sandboxOptionDescription;
+const agentOptionLabel = app.agentOptionLabel;
+const agentOptionDescription = app.agentOptionDescription;
 const resolveSlashAction = app.resolveSlashAction;
 const padRight = app.padRight;
 
@@ -210,9 +213,11 @@ const Model = struct {
     model_list: zz.List(ModelOption),
     reasoning_list: zz.List(ReasoningOption),
     sandbox_list: zz.List(SandboxOption),
+    agent_list: zz.List(AgentOption),
     active_model: []const u8,
     active_reasoning: []const u8,
     active_sandbox: []const u8,
+    active_agent_action: []const u8,
 
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
@@ -246,9 +251,11 @@ const Model = struct {
             .model_list = zz.List(ModelOption).init(allocator),
             .reasoning_list = zz.List(ReasoningOption).init(allocator),
             .sandbox_list = zz.List(SandboxOption).init(allocator),
+            .agent_list = zz.List(AgentOption).init(allocator),
             .active_model = modelOptionLabel(.gpt_5_5),
             .active_reasoning = reasoningOptionLabel(.medium),
             .active_sandbox = sandboxOptionLabel(.workspace_write),
+            .active_agent_action = "none",
         };
         self.composer.setPrompt("> ");
         self.composer.setPlaceholder("Type your message...");
@@ -279,6 +286,7 @@ const Model = struct {
         self.model_list.deinit();
         self.reasoning_list.deinit();
         self.sandbox_list.deinit();
+        self.agent_list.deinit();
     }
 
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -345,6 +353,7 @@ const Model = struct {
             .select_model => self.handleModelSelectionKey(key),
             .select_reasoning => self.handleReasoningSelectionKey(key),
             .select_sandbox => self.handleSandboxSelectionKey(key),
+            .select_agents => self.handleAgentSelectionKey(key),
         };
     }
 
@@ -433,6 +442,28 @@ const Model = struct {
         }
     }
 
+    fn handleAgentSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
+        switch (key.key) {
+            .escape => {
+                self.mode = .chat;
+                self.status = "idle";
+                return .none;
+            },
+            .enter => {
+                if (self.agent_list.selectedValue()) |value| {
+                    self.active_agent_action = agentOptionLabel(value);
+                    self.mode = .chat;
+                    self.status = agentSelectionStatus(value);
+                }
+                return .none;
+            },
+            else => {
+                self.agent_list.handleKey(key);
+                return .none;
+            },
+        }
+    }
+
     fn handleComposerSubmit(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const raw = self.composer.getValue();
         const trimmed = std.mem.trim(u8, raw, " \t\n\r");
@@ -472,6 +503,11 @@ const Model = struct {
                 self.prepareSandboxSelection();
                 self.mode = .select_sandbox;
                 self.status = "select sandbox mode";
+            },
+            .agents => {
+                self.prepareAgentSelection();
+                self.mode = .select_agents;
+                self.status = "select agent action";
             },
             .clear => {
                 self.clearSession();
@@ -819,6 +855,13 @@ const Model = struct {
                 self.active_sandbox,
                 self.sandbox_list.view(allocator) catch "",
             ) catch transcript_view,
+            .select_agents => self.renderSelectionPanel(
+                allocator,
+                ctx.width,
+                "Agents",
+                self.active_agent_action,
+                self.agent_list.view(allocator) catch "",
+            ) catch transcript_view,
         };
         const input_line = green.render(allocator, composer_view) catch composer_view;
         const slash_popup = if (self.show_commands)
@@ -1018,9 +1061,20 @@ const Model = struct {
             zz.List(SandboxOption).Item.withDescription(.danger_full_access, sandboxOptionLabel(.danger_full_access), sandboxOptionDescription(.danger_full_access)),
         }) catch {};
 
+        self.agent_list.height = 5;
+        self.agent_list.cursor_style = self.agent_list.cursor_style.fg(.green).bold(true);
+        self.agent_list.selected_style = self.agent_list.selected_style.fg(.green);
+        self.agent_list.status_message = "Enter to select";
+        self.agent_list.addItems(&.{
+            zz.List(AgentOption).Item.withDescription(.create, agentOptionLabel(.create), agentOptionDescription(.create)),
+            zz.List(AgentOption).Item.withDescription(.list, agentOptionLabel(.list), agentOptionDescription(.list)),
+            zz.List(AgentOption).Item.withDescription(.view, agentOptionLabel(.view), agentOptionDescription(.view)),
+        }) catch {};
+
         self.prepareModelSelection();
         self.prepareReasoningSelection();
         self.prepareSandboxSelection();
+        self.prepareAgentSelection();
     }
 
     fn prepareModelSelection(self: *Model) void {
@@ -1056,12 +1110,31 @@ const Model = struct {
         self.sandbox_list.selectCurrent();
     }
 
+    fn prepareAgentSelection(self: *Model) void {
+        self.agent_list.gotoFirst();
+        for (self.agent_list.items.items, 0..) |item, index| {
+            if (std.mem.eql(u8, agentOptionLabel(item.value), self.active_agent_action)) {
+                self.agent_list.cursor = index;
+                break;
+            }
+        }
+        self.agent_list.selectCurrent();
+    }
+
     pub fn resize(self: *Model, width: u16, height: u16) void {
         self.header_height = headerHeight(height);
         self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
     }
 };
+
+fn agentSelectionStatus(option: AgentOption) []const u8 {
+    return switch (option) {
+        .create => "agent create selected",
+        .list => "agent list selected",
+        .view => "agent view selected",
+    };
+}
 
 fn requestTypeScriptResponse(
     allocator: std.mem.Allocator,
