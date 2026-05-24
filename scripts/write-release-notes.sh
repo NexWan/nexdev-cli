@@ -10,10 +10,27 @@ mkdir -p "$(dirname "$RELEASE_NOTES_PATH")"
 cat > "$RELEASE_NOTES_PATH" <<EOF
 ## Install
 
-Choose the asset suffix for your system from this release, for example
-\`linux-x64\`, \`macos-arm64\`, or \`macos-x64\`.
+Install the latest release with:
 
-### curl
+\`\`\`sh
+curl -fsSL https://raw.githubusercontent.com/${REPOSITORY}/main/scripts/install.sh | bash
+\`\`\`
+
+Install this exact release with:
+
+\`\`\`sh
+curl -fsSL https://raw.githubusercontent.com/${REPOSITORY}/main/scripts/install.sh | VERSION="${VERSION}" bash
+\`\`\`
+
+The bootstrap installer detects Linux, macOS, or Windows and downloads the
+matching release archive for x64 or arm64.
+
+### Manual Download
+
+Choose the asset suffix for your system from this release, for example
+\`linux-x64\`, \`macos-arm64\`, \`macos-x64\`, or \`windows-x64\`.
+
+#### curl
 
 \`\`\`sh
 VERSION="${VERSION}"
@@ -25,7 +42,7 @@ cd "nexdev-cli-\${VERSION}-\${TARGET}"
 PREFIX="\$HOME/.local" ./install.sh
 \`\`\`
 
-### wget
+#### wget
 
 \`\`\`sh
 VERSION="${VERSION}"
@@ -37,8 +54,16 @@ cd "nexdev-cli-\${VERSION}-\${TARGET}"
 PREFIX="\$HOME/.local" ./install.sh
 \`\`\`
 
-Node.js 22.6 or newer must be available on \`PATH\`. The archive bundles the
-TypeScript/Codex runtime dependencies used by the Zig console.
+Requirements:
+
+- Linux, macOS, or Windows with Bash available.
+- x64 or arm64 release asset for your OS.
+- Node.js 22.6 or newer on \`PATH\`.
+- \`curl\` or \`wget\`, plus \`tar\`.
+
+The archive bundles the TypeScript/Codex runtime dependencies used by the Zig
+console. The installer does not edit shell startup files; add the printed
+binary directory to \`PATH\` if needed.
 EOF
 
 echo "$RELEASE_NOTES_PATH"

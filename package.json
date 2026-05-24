@@ -6,7 +6,7 @@
   "scripts": {
     "agent:rpc": "node --experimental-strip-types agent/rpc-module.ts",
     "typecheck": "tsc --noEmit",
-    "release:package": "scripts/package-release.sh"
+    "release:package": "bash scripts/package-release.sh"
   },
   "engines": {
     "node": ">=22.6"
