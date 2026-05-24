@@ -26,6 +26,8 @@ jobs:
             os_name: linux
           - os: macos-latest
             os_name: macos
+          - os: windows-latest
+            os_name: windows
 
     steps:
       - name: Checkout
@@ -55,6 +57,7 @@ jobs:
         run: zig build test
 
       - name: Package release archive
+        shell: bash
         env:
           VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           OS_NAME: ${{ matrix.os_name }}

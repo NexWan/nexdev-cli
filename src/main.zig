@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zz = @import("zigzag");
 const app = @import("nexdev_cli");
 const rpc = @import("zig_rpc");
@@ -1115,30 +1116,51 @@ fn resolveExecutable(
     environ_map: *const std.process.Environ.Map,
     name: []const u8,
 ) ![]u8 {
-    for (name) |char| {
-        if (char == '/') return allocator.dupe(u8, name);
-    }
+    if (hasPathSeparator(name)) return allocator.dupe(u8, name);
 
     const path_value = environ_map.get("PATH") orelse return error.FileNotFound;
-    var path_iter = std.mem.splitScalar(u8, path_value, ':');
+    const path_separator: u8 = if (builtin.os.tag == .windows) ';' else ':';
+    var path_iter = std.mem.splitScalar(u8, path_value, path_separator);
     while (path_iter.next()) |dir| {
         if (dir.len == 0) continue;
 
-        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
-        errdefer allocator.free(candidate);
+        if (try resolveExecutableInDir(allocator, io, dir, name)) |candidate| {
+            return candidate;
+        }
 
-        std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true }) catch |err| switch (err) {
-            error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.BadPathName => {
-                allocator.free(candidate);
-                continue;
-            },
-            else => return err,
-        };
+        if (builtin.os.tag == .windows and !std.mem.endsWith(u8, name, ".exe")) {
+            const exe_name = try std.fmt.allocPrint(allocator, "{s}.exe", .{name});
+            defer allocator.free(exe_name);
 
-        return candidate;
+            if (try resolveExecutableInDir(allocator, io, dir, exe_name)) |candidate| {
+                return candidate;
+            }
+        }
     }
 
     return error.FileNotFound;
+}
+
+fn hasPathSeparator(path: []const u8) bool {
+    for (path) |char| {
+        if (char == '/' or char == '\\') return true;
+    }
+
+    return false;
+}
+
+fn resolveExecutableInDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: []const u8,
+    name: []const u8,
+) !?[]u8 {
+    const candidate = try std.fs.path.join(allocator, &.{ dir, name });
+    errdefer allocator.free(candidate);
+
+    if (canExecutePath(io, candidate)) return candidate;
+    allocator.free(candidate);
+    return null;
 }
 
 fn resolveAgentEntrypoint(
@@ -1161,6 +1183,10 @@ fn resolveAgentEntrypoint(
     const exe_dir = try std.process.executableDirPathAlloc(io, allocator);
     defer allocator.free(exe_dir);
 
+    const lib_adjacent_candidate = try std.fs.path.join(allocator, &.{ exe_dir, "..", "agent", "rpc-module.ts" });
+    if (canAccessPath(io, lib_adjacent_candidate)) return lib_adjacent_candidate;
+    allocator.free(lib_adjacent_candidate);
+
     const installed_candidate = try std.fs.path.join(allocator, &.{ exe_dir, "..", "lib", "nexdev-cli", "agent", "rpc-module.ts" });
     if (canAccessPath(io, installed_candidate)) return installed_candidate;
     allocator.free(installed_candidate);
@@ -1175,6 +1201,16 @@ fn resolveAgentEntrypoint(
     }
 
     return error.FileNotFound;
+}
+
+fn canExecutePath(io: std.Io, path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{ .execute = true }) catch return false;
+        return true;
+    }
+
+    std.Io.Dir.cwd().access(io, path, .{ .execute = true }) catch return false;
+    return true;
 }
 
 fn canAccessPath(io: std.Io, path: []const u8) bool {

@@ -2,13 +2,78 @@
 set -euo pipefail
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="${PREFIX:-/usr/local}"
-BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
-LIB_DIR="${LIB_DIR:-$PREFIX/lib/nexdev-cli}"
+
+detect_os_name() {
+  case "$(uname -s)" in
+    Darwin) echo "macos" ;;
+    Linux) echo "linux" ;;
+    CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+    *)
+      echo "Unsupported OS: $(uname -s)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+default_bin_dir() {
+  if [[ -n "${PREFIX:-}" ]]; then
+    printf '%s\n' "$PREFIX/bin"
+    return
+  fi
+
+  case "$OS_NAME" in
+    windows)
+      local local_app_data="${LOCALAPPDATA:-$HOME/AppData/Local}"
+      printf '%s\n' "$local_app_data/Programs/nexdev-cli/bin"
+      ;;
+    linux|macos)
+      printf '%s\n' "$HOME/.local/bin"
+      ;;
+  esac
+}
+
+default_lib_dir() {
+  if [[ -n "${PREFIX:-}" ]]; then
+    printf '%s\n' "$PREFIX/lib/nexdev-cli"
+    return
+  fi
+
+  case "$OS_NAME" in
+    windows)
+      local local_app_data="${LOCALAPPDATA:-$HOME/AppData/Local}"
+      printf '%s\n' "$local_app_data/nexdev-cli"
+      ;;
+    macos)
+      printf '%s\n' "$HOME/Library/Application Support/nexdev-cli"
+      ;;
+    linux)
+      local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+      printf '%s\n' "$data_home/nexdev-cli"
+      ;;
+  esac
+}
+
+to_windows_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+OS_NAME="$(detect_os_name)"
+EXE_EXT=""
+if [[ "$OS_NAME" == "windows" ]]; then
+  EXE_EXT=".exe"
+fi
+
+BIN_DIR="${BIN_DIR:-$(default_bin_dir)}"
+LIB_DIR="${LIB_DIR:-$(default_lib_dir)}"
 RUNTIME_SOURCE="$SOURCE_DIR/lib/nexdev-cli"
-BINARY_SOURCE="$SOURCE_DIR/bin/nexdev_cli"
-BINARY_DEST="$LIB_DIR/bin/nexdev_cli"
+BINARY_SOURCE="$SOURCE_DIR/bin/nexdev_cli$EXE_EXT"
+BINARY_DEST="$LIB_DIR/bin/nexdev_cli$EXE_EXT"
 LAUNCHER_DEST="$BIN_DIR/nexdev-cli"
+CMD_LAUNCHER_DEST="$BIN_DIR/nexdev-cli.cmd"
 
 if [[ ! -x "$BINARY_SOURCE" ]]; then
   echo "Missing packaged binary: $BINARY_SOURCE" >&2
@@ -49,4 +114,24 @@ exec "$BINARY_DEST" "\$@"
 EOF
 chmod 755 "$LAUNCHER_DEST"
 
+if [[ "$OS_NAME" == "windows" ]]; then
+  WINDOWS_LIB_DIR="$(to_windows_path "$LIB_DIR")"
+  WINDOWS_BINARY_DEST="$(to_windows_path "$BINARY_DEST")"
+  cat > "$CMD_LAUNCHER_DEST" <<EOF
+@echo off
+set "NEXDEV_CLI_LIB_DIR=$WINDOWS_LIB_DIR"
+"$WINDOWS_BINARY_DEST" %*
+EOF
+fi
+
 echo "Installed nexdev-cli to $LAUNCHER_DEST"
+if [[ "$OS_NAME" == "windows" ]]; then
+  echo "Installed Windows launcher to $CMD_LAUNCHER_DEST"
+fi
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *)
+    echo "Add $BIN_DIR to PATH to run nexdev-cli from any shell."
+    ;;
+esac
