@@ -33,6 +33,8 @@ const padRight = app.padRight;
 
 const compact_header_height: u16 = 3;
 const logo_header_height: u16 = 18;
+const logo_header_min_height: u16 = 40;
+const logo_header_min_width: u16 = 120;
 const footer_height: u16 = 3;
 
 const RpcChatMessage = agent_runtime.RpcChatMessage;
@@ -105,7 +107,7 @@ pub const Model = struct {
             .composer = zz.TextInput.init(allocator),
             .behavior_text = zz.TextArea.init(allocator),
             .transcript = zz.Viewport.init(allocator, ctx.width, transcriptHeight(ctx.height)),
-            .header_height = headerHeight(ctx.height),
+            .header_height = headerHeight(ctx.width, ctx.height),
             .show_commands = false,
             .next_id = 1,
             .pending_response_id = null,
@@ -1557,7 +1559,7 @@ pub const Model = struct {
 
     /// Recomputes component sizes after terminal resize.
     pub fn resize(self: *Model, width: u16, height: u16) void {
-        self.header_height = headerHeight(height);
+        self.header_height = headerHeight(width, height);
         self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
         self.behavior_text.setSize(agentBehaviorEditorWidth(width), agentBehaviorEditorHeight(height));
@@ -1672,8 +1674,8 @@ fn agentBehaviorEditorHeight(height: u16) u16 {
 }
 
 // Chooses between compact and logo header layouts.
-fn headerHeight(height: u16) u16 {
-    return if (height > logo_header_height + footer_height)
+fn headerHeight(width: u16, height: u16) u16 {
+    return if (width >= logo_header_min_width and height >= logo_header_min_height)
         logo_header_height
     else
         compact_header_height;
