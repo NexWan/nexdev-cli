@@ -810,14 +810,12 @@ pub const Model = struct {
         const writer = &out.writer;
 
         const title_style = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
-        const meta_style = (zz.Style{}).fg(.green).bold(true);
         const dim_style = (zz.Style{}).fg(.gray(10));
 
         const header = try self.renderHeader(
             self.allocator,
             self.transcript.width,
             title_style,
-            meta_style,
             dim_style,
         );
         defer self.allocator.free(header);
@@ -858,6 +856,7 @@ pub const Model = struct {
         const pink = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
         const dim = (zz.Style{}).fg(.gray(10));
 
+        const footer_status = self.renderFooterStatus(allocator, green) catch "";
         const separator_text = modeFooterText(self.mode);
         const separator = dim.render(allocator, separator_text) catch separator_text;
 
@@ -912,32 +911,32 @@ pub const Model = struct {
         else
             "";
 
-        const top_block = self.renderHeader(allocator, ctx.width, pink, green, dim) catch "NexDev - CLI";
+        const top_block = self.renderHeader(allocator, ctx.width, pink, dim) catch "NexDev - CLI";
 
         const body = if (self.mode == .chat)
             if (self.show_commands)
                 zz.join.vertical(
                     allocator,
                     .left,
-                    &.{ center_view, slash_popup, separator, input_line },
+                    &.{ center_view, slash_popup, footer_status, separator, input_line },
                 ) catch center_view
             else
                 zz.join.vertical(
                     allocator,
                     .left,
-                    &.{ center_view, separator, input_line },
+                    &.{ center_view, footer_status, separator, input_line },
                 ) catch center_view
         else if (self.show_commands)
             zz.join.vertical(
                 allocator,
                 .left,
-                &.{ top_block, center_view, slash_popup, separator, input_line },
+                &.{ top_block, center_view, slash_popup, footer_status, separator, input_line },
             ) catch top_block
         else
             zz.join.vertical(
                 allocator,
                 .left,
-                &.{ top_block, center_view, separator, input_line },
+                &.{ top_block, center_view, footer_status, separator, input_line },
             ) catch top_block;
 
         return body;
@@ -949,19 +948,10 @@ pub const Model = struct {
         allocator: std.mem.Allocator,
         width: u16,
         title_style: zz.Style,
-        meta_style: zz.Style,
         dim_style: zz.Style,
     ) ![]const u8 {
         const title = try title_style.render(allocator, "NexDev - CLI");
         defer allocator.free(title);
-        const meta_raw = try std.fmt.allocPrint(
-            allocator,
-            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
-            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
-        );
-        defer allocator.free(meta_raw);
-        const meta = try meta_style.render(allocator, meta_raw);
-        defer allocator.free(meta);
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
         defer allocator.free(rule);
 
@@ -971,7 +961,7 @@ pub const Model = struct {
             const status_view = try zz.join.vertical(
                 allocator,
                 .left,
-                &.{ title, meta, rule },
+                &.{ title, rule },
             );
             defer allocator.free(status_view);
 
@@ -984,11 +974,27 @@ pub const Model = struct {
         } else try zz.join.vertical(
             allocator,
             .left,
-            &.{ title, meta, rule },
+            &.{ title, rule },
         );
         defer allocator.free(content);
 
         return zz.place.place(allocator, width, self.header_height, .left, .top, content);
+    }
+
+    // Renders the fixed session metadata row above the footer shortcuts.
+    fn renderFooterStatus(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        style: zz.Style,
+    ) ![]const u8 {
+        const raw = try std.fmt.allocPrint(
+            allocator,
+            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
+            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
+        );
+        defer allocator.free(raw);
+
+        return style.render(allocator, raw);
     }
 
     // Wraps a list component in the common centered selector panel.
