@@ -18,7 +18,6 @@ const ModelOption = app.ModelOption;
 const ReasoningOption = app.ReasoningOption;
 const SandboxOption = app.SandboxOption;
 const AgentOption = app.AgentOption;
-const logo = app.logo;
 const slash_commands = app.slash_commands;
 const modelOptionLabel = app.modelOptionLabel;
 const modelOptionDescription = app.modelOptionDescription;
@@ -32,7 +31,6 @@ const resolveSlashAction = app.resolveSlashAction;
 const padRight = app.padRight;
 
 const compact_header_height: u16 = 3;
-const logo_header_height: u16 = 18;
 const footer_height: u16 = 3;
 
 const RpcChatMessage = agent_runtime.RpcChatMessage;
@@ -74,6 +72,8 @@ pub const Model = struct {
     active_agent_action: []const u8,
     active_agent: ?AgentConfig,
     agent_draft: AgentDraft,
+    workspace_path: ?[:0]u8,
+    home_path: ?[]u8,
 
     /// Message types delivered to the ZigZag update loop.
     pub const Msg = union(enum) {
@@ -91,6 +91,11 @@ pub const Model = struct {
     /// Initializes widgets, default selections, and the initial viewport layout.
     pub fn init(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const allocator = ctx.persistent_allocator;
+        const workspace_path: ?[:0]u8 = std.process.currentPathAlloc(ctx.io, allocator) catch null;
+        const home_path: ?[]u8 = if (ctx.environ_map.get("HOME") orelse ctx.environ_map.get("USERPROFILE")) |home|
+            allocator.dupe(u8, home) catch null
+        else
+            null;
 
         self.* = .{
             .allocator = allocator,
@@ -98,7 +103,7 @@ pub const Model = struct {
             .composer = zz.TextInput.init(allocator),
             .behavior_text = zz.TextArea.init(allocator),
             .transcript = zz.Viewport.init(allocator, ctx.width, transcriptHeight(ctx.height)),
-            .header_height = headerHeight(ctx.height),
+            .header_height = compact_header_height,
             .show_commands = false,
             .next_id = 1,
             .pending_response_id = null,
@@ -120,6 +125,8 @@ pub const Model = struct {
             .active_agent_action = "none",
             .active_agent = null,
             .agent_draft = .{},
+            .workspace_path = workspace_path,
+            .home_path = home_path,
         };
         self.composer.setPrompt("> ");
         self.composer.setPlaceholder("Type your message...");
@@ -152,6 +159,8 @@ pub const Model = struct {
         self.freeAgentTask();
         self.freePendingResponseText();
         self.agent_draft.deinit(self.allocator);
+        if (self.workspace_path) |path| self.allocator.free(path);
+        if (self.home_path) |path| self.allocator.free(path);
         self.clearActiveAgent();
         self.clearAgentRecords();
         self.messages.deinit();
@@ -219,7 +228,7 @@ pub const Model = struct {
 
     // Checks whether a mouse event falls inside the transcript viewport.
     fn isTranscriptMouseEvent(self: *const Model, mouse: zz.MouseEvent) bool {
-        const transcript_top = self.header_height;
+        const transcript_top = 0;
         const transcript_bottom = transcript_top + self.transcript.height;
         return mouse.y >= transcript_top and mouse.y < transcript_bottom;
     }
@@ -809,8 +818,20 @@ pub const Model = struct {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         const writer = &out.writer;
 
-        for (self.messages.items, 0..) |msg, idx| {
-            if (idx > 0) try writer.writeAll("\n\n");
+        const title_style = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
+        const dim_style = (zz.Style{}).fg(.gray(10));
+
+        const header = try self.renderHeader(
+            self.allocator,
+            self.transcript.width,
+            title_style,
+            dim_style,
+        );
+        defer self.allocator.free(header);
+        try writer.writeAll(header);
+
+        for (self.messages.items) |msg| {
+            try writer.writeAll("\n\n");
 
             const label = switch (msg.role) {
                 .user => "You",
@@ -844,6 +865,7 @@ pub const Model = struct {
         const pink = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
         const dim = (zz.Style{}).fg(.gray(10));
 
+        const footer_status = self.renderFooterStatus(allocator, green, ctx.width) catch "";
         const separator_text = modeFooterText(self.mode);
         const separator = dim.render(allocator, separator_text) catch separator_text;
 
@@ -898,63 +920,98 @@ pub const Model = struct {
         else
             "";
 
-        const top_block = self.renderHeader(allocator, ctx.width, pink, green, dim) catch "NexDev - CLI";
+        const top_block = self.renderHeader(allocator, ctx.width, pink, dim) catch "NexDev - CLI";
 
-        const body = if (self.show_commands)
+        const body = if (self.mode == .chat)
+            if (self.show_commands)
+                zz.join.vertical(
+                    allocator,
+                    .left,
+                    &.{ center_view, slash_popup, footer_status, separator, input_line },
+                ) catch center_view
+            else
+                zz.join.vertical(
+                    allocator,
+                    .left,
+                    &.{ center_view, footer_status, separator, input_line },
+                ) catch center_view
+        else if (self.show_commands)
             zz.join.vertical(
                 allocator,
                 .left,
-                &.{ top_block, center_view, slash_popup, separator, input_line },
+                &.{ top_block, center_view, slash_popup, footer_status, separator, input_line },
             ) catch top_block
         else
             zz.join.vertical(
                 allocator,
                 .left,
-                &.{ top_block, center_view, separator, input_line },
+                &.{ top_block, center_view, footer_status, separator, input_line },
             ) catch top_block;
 
         return body;
     }
 
-    // Renders the compact or logo header depending on terminal height.
+    // Renders the compact welcome header.
     fn renderHeader(
         self: *const Model,
         allocator: std.mem.Allocator,
         width: u16,
         title_style: zz.Style,
-        meta_style: zz.Style,
         dim_style: zz.Style,
     ) ![]const u8 {
         const title = try title_style.render(allocator, "NexDev - CLI");
-        const meta_raw = try std.fmt.allocPrint(
-            allocator,
-            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
-            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
-        );
-        const meta = try meta_style.render(allocator, meta_raw);
+        defer allocator.free(title);
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
+        defer allocator.free(rule);
 
-        const content = if (self.header_height == logo_header_height) blk: {
-            const logo_view = try title_style.render(allocator, logo);
-            const status_view = try zz.join.vertical(
-                allocator,
-                .left,
-                &.{ title, meta, rule },
-            );
-
-            break :blk try zz.join.horizontalSep(
-                allocator,
-                .top,
-                "      ",
-                &.{ logo_view, status_view },
-            );
-        } else try zz.join.vertical(
+        const content = try zz.join.vertical(
             allocator,
             .left,
-            &.{ title, meta, rule },
+            &.{ title, rule },
         );
+        defer allocator.free(content);
 
         return zz.place.place(allocator, width, self.header_height, .left, .top, content);
+    }
+
+    // Renders the fixed session metadata row above the footer shortcuts.
+    fn renderFooterStatus(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        style: zz.Style,
+        width: u16,
+    ) ![]const u8 {
+        const workspace = try self.renderWorkspaceLabel(allocator);
+        defer allocator.free(workspace);
+
+        const raw = try std.fmt.allocPrint(
+            allocator,
+            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s} | Workspace: {s}",
+            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status, workspace },
+        );
+        defer allocator.free(raw);
+
+        const truncated = try truncateAscii(allocator, raw, width);
+        defer allocator.free(truncated);
+
+        return style.render(allocator, truncated);
+    }
+
+    // Returns the active workspace with the home directory shortened to `~`.
+    fn renderWorkspaceLabel(self: *const Model, allocator: std.mem.Allocator) ![]const u8 {
+        const path = self.workspace_path orelse return allocator.dupe(u8, "(unknown)");
+        const home = self.home_path orelse return allocator.dupe(u8, path);
+        if (home.len == 0) return allocator.dupe(u8, path);
+
+        if (std.mem.eql(u8, path, home)) {
+            return allocator.dupe(u8, "~");
+        }
+
+        if (path.len > home.len and std.mem.startsWith(u8, path, home) and isPathSeparator(path[home.len])) {
+            return std.fmt.allocPrint(allocator, "~{s}", .{path[home.len..]});
+        }
+
+        return allocator.dupe(u8, path);
     }
 
     // Wraps a list component in the common centered selector panel.
@@ -1482,7 +1539,7 @@ pub const Model = struct {
 
     /// Recomputes component sizes after terminal resize.
     pub fn resize(self: *Model, width: u16, height: u16) void {
-        self.header_height = headerHeight(height);
+        self.header_height = compact_header_height;
         self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
         self.behavior_text.setSize(agentBehaviorEditorWidth(width), agentBehaviorEditorHeight(height));
@@ -1496,6 +1553,21 @@ fn agentSelectionStatus(option: AgentOption) []const u8 {
         .list => "agent list selected",
         .view => "agent view selected",
     };
+}
+
+// Truncates footer text with an ASCII ellipsis so it stays on one terminal row.
+fn truncateAscii(allocator: std.mem.Allocator, text: []const u8, width: u16) ![]const u8 {
+    const max_width: usize = width;
+    if (max_width == 0) return allocator.dupe(u8, "");
+    if (text.len <= max_width) return allocator.dupe(u8, text);
+    if (max_width <= 3) return allocator.dupe(u8, text[0..max_width]);
+
+    return std.fmt.allocPrint(allocator, "{s}...", .{text[0 .. max_width - 3]});
+}
+
+// Accepts POSIX and Windows separators for home-relative workspace labels.
+fn isPathSeparator(char: u8) bool {
+    return char == '/' or char == '\\';
 }
 
 // Footer help text for the active mode.
@@ -1581,15 +1653,7 @@ fn agentBehaviorEditorHeight(height: u16) u16 {
     return editor_height;
 }
 
-// Chooses between compact and logo header layouts.
-fn headerHeight(height: u16) u16 {
-    return if (height > logo_header_height + footer_height)
-        logo_header_height
-    else
-        compact_header_height;
-}
-
 // Leaves room for header and footer when sizing the transcript viewport.
 fn transcriptHeight(height: u16) u16 {
-    return height -| headerHeight(height) -| footer_height;
+    return height -| footer_height;
 }
