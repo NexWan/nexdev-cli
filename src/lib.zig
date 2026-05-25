@@ -21,7 +21,18 @@ pub const AgentDone = struct { message_id: u64 };
 
 pub const AgentFailed = struct { message_id: u64, reason: []const u8 };
 
-pub const UiMode = enum { chat, select_model, select_reasoning, select_sandbox };
+pub const UiMode = enum {
+    chat,
+    select_model,
+    select_reasoning,
+    select_sandbox,
+    select_agents,
+    select_agent,
+    create_agent_name,
+    create_agent_description,
+    create_agent_behavior,
+    create_agent_model,
+};
 
 pub const ModelOption = enum {
     gpt_5_5,
@@ -34,7 +45,9 @@ pub const ReasoningOption = enum { low, medium, high };
 
 pub const SandboxOption = enum { read_only, workspace_write, danger_full_access };
 
-pub const SlashAction = enum { model, reasoning, sandbox, clear };
+pub const AgentOption = enum { create, list, view };
+
+pub const SlashAction = enum { model, reasoning, sandbox, agents, clear };
 
 pub const SlashCommand = struct {
     name: []const u8,
@@ -45,6 +58,7 @@ pub const slash_commands = [_]SlashCommand{
     .{ .name = "/model", .description = "Select a model" },
     .{ .name = "/reasoning", .description = "Set reasoning effort" },
     .{ .name = "/sandbox", .description = "Set filesystem sandbox" },
+    .{ .name = "/agents", .description = "Configure agent related settings" },
     .{ .name = "/clear", .description = "Clear the chat history" },
 };
 
@@ -123,6 +137,22 @@ pub fn sandboxOptionDescription(option: SandboxOption) []const u8 {
     };
 }
 
+pub fn agentOptionLabel(option: AgentOption) []const u8 {
+    return switch (option) {
+        .create => "Create",
+        .list => "List",
+        .view => "View",
+    };
+}
+
+pub fn agentOptionDescription(option: AgentOption) []const u8 {
+    return switch (option) {
+        .create => "Create a new agent",
+        .list => "List existing agents",
+        .view => "View existing agent settings",
+    };
+}
+
 pub fn resolveSlashAction(command: []const u8) ?SlashAction {
     if (command.len == 0 or command[0] != '/') return null;
 
@@ -141,6 +171,10 @@ pub fn resolveSlashAction(command: []const u8) ?SlashAction {
     if (std.mem.startsWith(u8, "sandbox", query)) {
         match_count += 1;
         result = .sandbox;
+    }
+    if (std.mem.startsWith(u8, "agents", query)) {
+        match_count += 1;
+        result = .agents;
     }
     if (std.mem.startsWith(u8, "clear", query)) {
         match_count += 1;
@@ -166,6 +200,8 @@ test "resolve slash action supports exact and unique prefixes" {
     try std.testing.expectEqual(SlashAction.model, resolveSlashAction("/m").?);
     try std.testing.expectEqual(SlashAction.reasoning, resolveSlashAction("/reasoning").?);
     try std.testing.expectEqual(SlashAction.sandbox, resolveSlashAction("/s").?);
+    try std.testing.expectEqual(SlashAction.agents, resolveSlashAction("/agents").?);
+    try std.testing.expectEqual(SlashAction.agents, resolveSlashAction("/a").?);
     try std.testing.expectEqual(SlashAction.clear, resolveSlashAction("/clear").?);
 }
 

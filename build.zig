@@ -14,12 +14,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const patched_zigzag = b.addModule("zigzag", .{
+        .root_source_file = b.path("src/zigzag_patch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    patched_zigzag.addImport("zigzag_upstream", zigzag.module("zigzag"));
+
     const lib = b.addModule("nexdev_cli", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
-    lib.addImport("zigzag", zigzag.module("zigzag"));
+    lib.addImport("zigzag", patched_zigzag);
     lib.addImport("zig_rpc", zig_rpc.module("zig_rpc"));
 
     const exe = b.addExecutable(.{
@@ -31,7 +38,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("nexdev_cli", lib);
-    exe.root_module.addImport("zigzag", zigzag.module("zigzag"));
+    exe.root_module.addImport("zigzag", patched_zigzag);
     exe.root_module.addImport("zig_rpc", zig_rpc.module("zig_rpc"));
 
     b.installArtifact(exe);
