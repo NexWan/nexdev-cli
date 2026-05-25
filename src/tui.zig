@@ -74,6 +74,8 @@ pub const Model = struct {
     active_agent_action: []const u8,
     active_agent: ?AgentConfig,
     agent_draft: AgentDraft,
+    workspace_path: ?[:0]u8,
+    home_path: ?[]u8,
 
     /// Message types delivered to the ZigZag update loop.
     pub const Msg = union(enum) {
@@ -91,6 +93,11 @@ pub const Model = struct {
     /// Initializes widgets, default selections, and the initial viewport layout.
     pub fn init(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const allocator = ctx.persistent_allocator;
+        const workspace_path: ?[:0]u8 = std.process.currentPathAlloc(ctx.io, allocator) catch null;
+        const home_path: ?[]u8 = if (ctx.environ_map.get("HOME") orelse ctx.environ_map.get("USERPROFILE")) |home|
+            allocator.dupe(u8, home) catch null
+        else
+            null;
 
         self.* = .{
             .allocator = allocator,
@@ -120,6 +127,8 @@ pub const Model = struct {
             .active_agent_action = "none",
             .active_agent = null,
             .agent_draft = .{},
+            .workspace_path = workspace_path,
+            .home_path = home_path,
         };
         self.composer.setPrompt("> ");
         self.composer.setPlaceholder("Type your message...");
@@ -152,6 +161,8 @@ pub const Model = struct {
         self.freeAgentTask();
         self.freePendingResponseText();
         self.agent_draft.deinit(self.allocator);
+        if (self.workspace_path) |path| self.allocator.free(path);
+        if (self.home_path) |path| self.allocator.free(path);
         self.clearActiveAgent();
         self.clearAgentRecords();
         self.messages.deinit();
@@ -856,7 +867,7 @@ pub const Model = struct {
         const pink = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
         const dim = (zz.Style{}).fg(.gray(10));
 
-        const footer_status = self.renderFooterStatus(allocator, green) catch "";
+        const footer_status = self.renderFooterStatus(allocator, green, ctx.width) catch "";
         const separator_text = modeFooterText(self.mode);
         const separator = dim.render(allocator, separator_text) catch separator_text;
 
@@ -986,15 +997,39 @@ pub const Model = struct {
         self: *const Model,
         allocator: std.mem.Allocator,
         style: zz.Style,
+        width: u16,
     ) ![]const u8 {
+        const workspace = try self.renderWorkspaceLabel(allocator);
+        defer allocator.free(workspace);
+
         const raw = try std.fmt.allocPrint(
             allocator,
-            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
-            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
+            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s} | Workspace: {s}",
+            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status, workspace },
         );
         defer allocator.free(raw);
 
-        return style.render(allocator, raw);
+        const truncated = try truncateAscii(allocator, raw, width);
+        defer allocator.free(truncated);
+
+        return style.render(allocator, truncated);
+    }
+
+    // Returns the active workspace with the home directory shortened to `~`.
+    fn renderWorkspaceLabel(self: *const Model, allocator: std.mem.Allocator) ![]const u8 {
+        const path = self.workspace_path orelse return allocator.dupe(u8, "(unknown)");
+        const home = self.home_path orelse return allocator.dupe(u8, path);
+        if (home.len == 0) return allocator.dupe(u8, path);
+
+        if (std.mem.eql(u8, path, home)) {
+            return allocator.dupe(u8, "~");
+        }
+
+        if (path.len > home.len and std.mem.startsWith(u8, path, home) and isPathSeparator(path[home.len])) {
+            return std.fmt.allocPrint(allocator, "~{s}", .{path[home.len..]});
+        }
+
+        return allocator.dupe(u8, path);
     }
 
     // Wraps a list component in the common centered selector panel.
@@ -1536,6 +1571,21 @@ fn agentSelectionStatus(option: AgentOption) []const u8 {
         .list => "agent list selected",
         .view => "agent view selected",
     };
+}
+
+// Truncates footer text with an ASCII ellipsis so it stays on one terminal row.
+fn truncateAscii(allocator: std.mem.Allocator, text: []const u8, width: u16) ![]const u8 {
+    const max_width: usize = width;
+    if (max_width == 0) return allocator.dupe(u8, "");
+    if (text.len <= max_width) return allocator.dupe(u8, text);
+    if (max_width <= 3) return allocator.dupe(u8, text[0..max_width]);
+
+    return std.fmt.allocPrint(allocator, "{s}...", .{text[0 .. max_width - 3]});
+}
+
+// Accepts POSIX and Windows separators for home-relative workspace labels.
+fn isPathSeparator(char: u8) bool {
+    return char == '/' or char == '\\';
 }
 
 // Footer help text for the active mode.
