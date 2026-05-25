@@ -219,7 +219,7 @@ pub const Model = struct {
 
     // Checks whether a mouse event falls inside the transcript viewport.
     fn isTranscriptMouseEvent(self: *const Model, mouse: zz.MouseEvent) bool {
-        const transcript_top = self.header_height;
+        const transcript_top = 0;
         const transcript_bottom = transcript_top + self.transcript.height;
         return mouse.y >= transcript_top and mouse.y < transcript_bottom;
     }
@@ -809,8 +809,22 @@ pub const Model = struct {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         const writer = &out.writer;
 
-        for (self.messages.items, 0..) |msg, idx| {
-            if (idx > 0) try writer.writeAll("\n\n");
+        const title_style = (zz.Style{}).fg(zz.Color.fromRgb(255, 132, 190)).bold(true);
+        const meta_style = (zz.Style{}).fg(.green).bold(true);
+        const dim_style = (zz.Style{}).fg(.gray(10));
+
+        const header = try self.renderHeader(
+            self.allocator,
+            self.transcript.width,
+            title_style,
+            meta_style,
+            dim_style,
+        );
+        defer self.allocator.free(header);
+        try writer.writeAll(header);
+
+        for (self.messages.items) |msg| {
+            try writer.writeAll("\n\n");
 
             const label = switch (msg.role) {
                 .user => "You",
@@ -900,7 +914,20 @@ pub const Model = struct {
 
         const top_block = self.renderHeader(allocator, ctx.width, pink, green, dim) catch "NexDev - CLI";
 
-        const body = if (self.show_commands)
+        const body = if (self.mode == .chat)
+            if (self.show_commands)
+                zz.join.vertical(
+                    allocator,
+                    .left,
+                    &.{ center_view, slash_popup, separator, input_line },
+                ) catch center_view
+            else
+                zz.join.vertical(
+                    allocator,
+                    .left,
+                    &.{ center_view, separator, input_line },
+                ) catch center_view
+        else if (self.show_commands)
             zz.join.vertical(
                 allocator,
                 .left,
@@ -926,21 +953,27 @@ pub const Model = struct {
         dim_style: zz.Style,
     ) ![]const u8 {
         const title = try title_style.render(allocator, "NexDev - CLI");
+        defer allocator.free(title);
         const meta_raw = try std.fmt.allocPrint(
             allocator,
             "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
             .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
         );
+        defer allocator.free(meta_raw);
         const meta = try meta_style.render(allocator, meta_raw);
+        defer allocator.free(meta);
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
+        defer allocator.free(rule);
 
         const content = if (self.header_height == logo_header_height) blk: {
             const logo_view = try title_style.render(allocator, logo);
+            defer allocator.free(logo_view);
             const status_view = try zz.join.vertical(
                 allocator,
                 .left,
                 &.{ title, meta, rule },
             );
+            defer allocator.free(status_view);
 
             break :blk try zz.join.horizontalSep(
                 allocator,
@@ -953,6 +986,7 @@ pub const Model = struct {
             .left,
             &.{ title, meta, rule },
         );
+        defer allocator.free(content);
 
         return zz.place.place(allocator, width, self.header_height, .left, .top, content);
     }
@@ -1591,5 +1625,5 @@ fn headerHeight(height: u16) u16 {
 
 // Leaves room for header and footer when sizing the transcript viewport.
 fn transcriptHeight(height: u16) u16 {
-    return height -| headerHeight(height) -| footer_height;
+    return height -| footer_height;
 }
