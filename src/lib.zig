@@ -1,26 +1,39 @@
+//! Shared domain types and pure helpers for the NexDev CLI.
+//!
+//! Keep reusable chat, option, and slash-command definitions here. TUI state and
+//! process/runtime behavior should stay in the app-private modules.
+
 const std = @import("std");
 
+/// Chat roles understood by both the TUI transcript and the agent RPC payload.
 pub const Role = enum { user, assistant, tool, system };
 
+/// Rendering state for a transcript message.
 pub const MessageState = enum { complete, streaming, failed };
 
+/// A single in-memory transcript entry owned by the TUI model.
 pub const ChatMessage = struct {
     id: u64,
     role: Role,
     text: []u8,
     state: MessageState,
 
+    /// Releases the owned message text.
     pub fn deinit(self: *ChatMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
     }
 };
 
+/// Incremental agent output chunk for a pending assistant message.
 pub const AgentDelta = struct { message_id: u64, bytes: []const u8 };
 
+/// Completion event for a pending assistant message.
 pub const AgentDone = struct { message_id: u64 };
 
+/// Failure event for a pending assistant message.
 pub const AgentFailed = struct { message_id: u64, reason: []const u8 };
 
+/// Top-level TUI mode; update and view dispatch are keyed off this value.
 pub const UiMode = enum {
     chat,
     select_model,
@@ -34,6 +47,7 @@ pub const UiMode = enum {
     create_agent_model,
 };
 
+/// Model choices shown in the `/model` selector.
 pub const ModelOption = enum {
     gpt_5_5,
     gpt_5_4,
@@ -41,19 +55,25 @@ pub const ModelOption = enum {
     gpt_5_3_codex,
 };
 
+/// Reasoning effort choices passed to the agent runtime.
 pub const ReasoningOption = enum { low, medium, high };
 
+/// Filesystem sandbox choices passed to the agent runtime.
 pub const SandboxOption = enum { read_only, workspace_write, danger_full_access };
 
+/// Actions available from the `/agents` selector.
 pub const AgentOption = enum { create, list, view };
 
+/// Parsed slash-command action.
 pub const SlashAction = enum { model, reasoning, sandbox, agents, clear };
 
+/// Display metadata for one slash command.
 pub const SlashCommand = struct {
     name: []const u8,
     description: []const u8,
 };
 
+/// Commands suggested when the composer starts with `/`.
 pub const slash_commands = [_]SlashCommand{
     .{ .name = "/model", .description = "Select a model" },
     .{ .name = "/reasoning", .description = "Set reasoning effort" },
@@ -62,11 +82,13 @@ pub const slash_commands = [_]SlashCommand{
     .{ .name = "/clear", .description = "Clear the chat history" },
 };
 
+/// Placeholder response kept for demo/testing flows that do not call an agent.
 pub const demo_response =
     "This is a simulated agent response. The UI is appending small chunks on " ++
     "timer ticks, which is the same shape you would use when draining a real " ++
     "backend or RPC event queue.";
 
+/// ASCII logo rendered in the tall header layout.
 pub const logo =
     "             *                             \n" ++
     "     *++   +  +                            \n" ++
@@ -87,6 +109,7 @@ pub const logo =
     "           +     +*       ++      +        \n" ++
     "                    *++*+     ++           ";
 
+/// Returns the exact runtime label for a model option.
 pub fn modelOptionLabel(option: ModelOption) []const u8 {
     return switch (option) {
         .gpt_5_5 => "GPT-5.5",
@@ -96,6 +119,7 @@ pub fn modelOptionLabel(option: ModelOption) []const u8 {
     };
 }
 
+/// Returns the short help text shown beside a model option.
 pub fn modelOptionDescription(option: ModelOption) []const u8 {
     return switch (option) {
         .gpt_5_5 => "Frontier model",
@@ -105,6 +129,7 @@ pub fn modelOptionDescription(option: ModelOption) []const u8 {
     };
 }
 
+/// Returns the exact runtime label for a reasoning option.
 pub fn reasoningOptionLabel(option: ReasoningOption) []const u8 {
     return switch (option) {
         .low => "low",
@@ -113,6 +138,7 @@ pub fn reasoningOptionLabel(option: ReasoningOption) []const u8 {
     };
 }
 
+/// Returns the short help text shown beside a reasoning option.
 pub fn reasoningOptionDescription(option: ReasoningOption) []const u8 {
     return switch (option) {
         .low => "Fast responses",
@@ -121,6 +147,7 @@ pub fn reasoningOptionDescription(option: ReasoningOption) []const u8 {
     };
 }
 
+/// Returns the exact runtime label for a sandbox option.
 pub fn sandboxOptionLabel(option: SandboxOption) []const u8 {
     return switch (option) {
         .read_only => "read-only",
@@ -129,6 +156,7 @@ pub fn sandboxOptionLabel(option: SandboxOption) []const u8 {
     };
 }
 
+/// Returns the short help text shown beside a sandbox option.
 pub fn sandboxOptionDescription(option: SandboxOption) []const u8 {
     return switch (option) {
         .read_only => "Inspect files only",
@@ -137,6 +165,7 @@ pub fn sandboxOptionDescription(option: SandboxOption) []const u8 {
     };
 }
 
+/// Returns the display label for an agent-menu action.
 pub fn agentOptionLabel(option: AgentOption) []const u8 {
     return switch (option) {
         .create => "Create",
@@ -145,6 +174,7 @@ pub fn agentOptionLabel(option: AgentOption) []const u8 {
     };
 }
 
+/// Returns the short help text shown beside an agent-menu action.
 pub fn agentOptionDescription(option: AgentOption) []const u8 {
     return switch (option) {
         .create => "Create a new agent",
@@ -153,6 +183,7 @@ pub fn agentOptionDescription(option: AgentOption) []const u8 {
     };
 }
 
+/// Resolves exact slash commands and unique prefixes to a UI action.
 pub fn resolveSlashAction(command: []const u8) ?SlashAction {
     if (command.len == 0 or command[0] != '/') return null;
 
@@ -184,6 +215,7 @@ pub fn resolveSlashAction(command: []const u8) ?SlashAction {
     return if (match_count == 1) result else null;
 }
 
+/// Allocates a fixed-width copy of `text`, padding or truncating as needed.
 pub fn padRight(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]const u8 {
     if (text.len >= width) return allocator.dupe(u8, text[0..width]);
 
