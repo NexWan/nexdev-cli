@@ -18,7 +18,6 @@ const ModelOption = app.ModelOption;
 const ReasoningOption = app.ReasoningOption;
 const SandboxOption = app.SandboxOption;
 const AgentOption = app.AgentOption;
-const logo = app.logo;
 const slash_commands = app.slash_commands;
 const modelOptionLabel = app.modelOptionLabel;
 const modelOptionDescription = app.modelOptionDescription;
@@ -32,9 +31,6 @@ const resolveSlashAction = app.resolveSlashAction;
 const padRight = app.padRight;
 
 const compact_header_height: u16 = 3;
-const logo_header_height: u16 = 18;
-const logo_header_min_height: u16 = 40;
-const logo_header_min_width: u16 = 120;
 const footer_height: u16 = 3;
 
 const RpcChatMessage = agent_runtime.RpcChatMessage;
@@ -107,7 +103,7 @@ pub const Model = struct {
             .composer = zz.TextInput.init(allocator),
             .behavior_text = zz.TextArea.init(allocator),
             .transcript = zz.Viewport.init(allocator, ctx.width, transcriptHeight(ctx.height)),
-            .header_height = headerHeight(ctx.width, ctx.height),
+            .header_height = compact_header_height,
             .show_commands = false,
             .next_id = 1,
             .pending_response_id = null,
@@ -955,7 +951,7 @@ pub const Model = struct {
         return body;
     }
 
-    // Renders the compact or logo header depending on terminal height.
+    // Renders the compact welcome header.
     fn renderHeader(
         self: *const Model,
         allocator: std.mem.Allocator,
@@ -968,23 +964,7 @@ pub const Model = struct {
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
         defer allocator.free(rule);
 
-        const content = if (self.header_height == logo_header_height) blk: {
-            const logo_view = try title_style.render(allocator, logo);
-            defer allocator.free(logo_view);
-            const status_view = try zz.join.vertical(
-                allocator,
-                .left,
-                &.{ title, rule },
-            );
-            defer allocator.free(status_view);
-
-            break :blk try zz.join.horizontalSep(
-                allocator,
-                .top,
-                "      ",
-                &.{ logo_view, status_view },
-            );
-        } else try zz.join.vertical(
+        const content = try zz.join.vertical(
             allocator,
             .left,
             &.{ title, rule },
@@ -1559,7 +1539,7 @@ pub const Model = struct {
 
     /// Recomputes component sizes after terminal resize.
     pub fn resize(self: *Model, width: u16, height: u16) void {
-        self.header_height = headerHeight(width, height);
+        self.header_height = compact_header_height;
         self.transcript.setSize(width, transcriptHeight(height));
         self.composer.setWidth(width -| 2);
         self.behavior_text.setSize(agentBehaviorEditorWidth(width), agentBehaviorEditorHeight(height));
@@ -1671,14 +1651,6 @@ fn agentBehaviorEditorHeight(height: u16) u16 {
     if (editor_height > 12) editor_height = 12;
     if (editor_height < 8) editor_height = 8;
     return editor_height;
-}
-
-// Chooses between compact and logo header layouts.
-fn headerHeight(width: u16, height: u16) u16 {
-    return if (width >= logo_header_min_width and height >= logo_header_min_height)
-        logo_header_height
-    else
-        compact_header_height;
 }
 
 // Leaves room for header and footer when sizing the transcript viewport.
