@@ -1,3 +1,9 @@
+//! ZigZag TUI model for the NexDev CLI.
+//!
+//! This file owns the terminal UI lifecycle: state initialization, input
+//! handling, view rendering, transcript updates, and bridging user actions to
+//! the agent runtime module.
+
 const std = @import("std");
 const zz = @import("zigzag");
 const app = @import("nexdev_cli");
@@ -34,7 +40,9 @@ const AgentDraft = agent_runtime.AgentDraft;
 const AgentConfig = agent_runtime.AgentConfig;
 const AgentTask = agent_runtime.AgentTask;
 
+/// Complete ZigZag model for the interactive chat UI.
 pub const Model = struct {
+    // Allocator and owned UI widgets.
     allocator: std.mem.Allocator,
     messages: std.array_list.Managed(ChatMessage),
     composer: zz.TextInput,
@@ -43,6 +51,7 @@ pub const Model = struct {
     header_height: u16,
     show_commands: bool,
 
+    // Runtime response state for the pending assistant message.
     next_id: u64,
     pending_response_id: ?u64,
     pending_response_text: ?[]u8,
@@ -51,6 +60,7 @@ pub const Model = struct {
     response_cursor: usize,
     thinking_phase: u8,
 
+    // Current mode and selection controls.
     mode: UiMode,
     model_list: zz.List(ModelOption),
     reasoning_list: zz.List(ReasoningOption),
@@ -65,6 +75,7 @@ pub const Model = struct {
     active_agent: ?AgentConfig,
     agent_draft: AgentDraft,
 
+    /// Message types delivered to the ZigZag update loop.
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
         paste: []const u8,
@@ -77,6 +88,7 @@ pub const Model = struct {
         agent_failed: AgentFailed,
     };
 
+    /// Initializes widgets, default selections, and the initial viewport layout.
     pub fn init(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const allocator = ctx.persistent_allocator;
 
@@ -132,6 +144,7 @@ pub const Model = struct {
         return .{ .set_title = "NexDev - CLI" };
     }
 
+    /// Releases all owned messages, widgets, agent records, and active tasks.
     pub fn deinit(self: *Model) void {
         for (self.messages.items) |*message| {
             message.deinit(self.allocator);
@@ -153,6 +166,7 @@ pub const Model = struct {
         self.agent_records.deinit();
     }
 
+    /// Central event dispatcher called by ZigZag.
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (msg) {
             .key => |key| return self.handleKey(key, ctx),
@@ -189,6 +203,7 @@ pub const Model = struct {
         }
     }
 
+    // Routes mouse wheel events to the transcript when chat mode is active.
     fn handleMouse(self: *Model, mouse: zz.MouseEvent) zz.Cmd(Msg) {
         if (self.mode != .chat) return .none;
         if (!self.isTranscriptMouseEvent(mouse)) return .none;
@@ -202,12 +217,14 @@ pub const Model = struct {
         return .none;
     }
 
+    // Checks whether a mouse event falls inside the transcript viewport.
     fn isTranscriptMouseEvent(self: *const Model, mouse: zz.MouseEvent) bool {
         const transcript_top = self.header_height;
         const transcript_bottom = transcript_top + self.transcript.height;
         return mouse.y >= transcript_top and mouse.y < transcript_bottom;
     }
 
+    // Dispatches keyboard input according to the active UI mode.
     fn handleKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         if (key.modifiers.ctrl and key.key.eql(.{ .char = 'c' })) {
             return .quit;
@@ -224,6 +241,7 @@ pub const Model = struct {
         };
     }
 
+    // Sends pasted text to whichever input widget currently owns editing.
     fn handlePaste(self: *Model, text: []const u8) zz.Cmd(Msg) {
         const paste_key = zz.KeyEvent{ .key = .{ .paste = text } };
 
@@ -247,6 +265,7 @@ pub const Model = struct {
         return .none;
     }
 
+    // Handles composer input, transcript navigation, and chat submission.
     fn handleChatKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => return .quit,
@@ -266,6 +285,7 @@ pub const Model = struct {
         return .none;
     }
 
+    // Handles the `/model` selector.
     fn handleModelSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
@@ -288,6 +308,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles the `/reasoning` selector.
     fn handleReasoningSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
@@ -310,6 +331,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles the `/sandbox` selector.
     fn handleSandboxSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
@@ -332,6 +354,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles the `/agents` action selector.
     fn handleAgentSelectionKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
@@ -360,6 +383,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles selecting one persisted agent record.
     fn handleAgentRecordSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
@@ -389,6 +413,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles create-agent wizard keys except for the multiline behavior step.
     fn handleAgentWizardKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         if (self.mode == .create_agent_behavior) {
             return self.handleAgentBehaviorKey(key, ctx);
@@ -408,6 +433,7 @@ pub const Model = struct {
         }
     }
 
+    // Handles the multiline behavior editor in the create-agent wizard.
     fn handleAgentBehaviorKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         if (key.modifiers.ctrl and key.key.eql(.{ .char = 'd' })) {
             return self.submitAgentWizardStep(ctx);
@@ -434,6 +460,7 @@ pub const Model = struct {
         }
     }
 
+    // Distinguishes slash commands from normal chat messages on Enter.
     fn handleComposerSubmit(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         const raw = self.composer.getValue();
         const trimmed = std.mem.trim(u8, raw, " \t\n\r");
@@ -445,6 +472,7 @@ pub const Model = struct {
         return self.submit(ctx);
     }
 
+    // Applies a resolved slash command by switching mode or clearing state.
     fn handleSlashCommand(self: *Model, command: []const u8) zz.Cmd(Msg) {
         self.show_commands = false;
 
@@ -488,6 +516,7 @@ pub const Model = struct {
         return .none;
     }
 
+    // Adds the user message, starts an agent task, and begins polling ticks.
     fn submit(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         if (self.pending_response_id != null) {
             self.status = "busy - please wait...";
@@ -576,6 +605,7 @@ pub const Model = struct {
         return zz.Cmd(Msg).everyMs(50);
     }
 
+    // Clears transient chat state while keeping reusable widgets allocated.
     fn clearSession(self: *Model) void {
         for (self.messages.items) |*message| {
             message.deinit(self.allocator);
@@ -596,6 +626,7 @@ pub const Model = struct {
         self.transcript.setContent("") catch {};
     }
 
+    // Polls the background agent task and converts its result into UI events.
     fn pollAgent(self: *Model) zz.Cmd(Msg) {
         const response_id = self.pending_response_id orelse return .none;
         const response_text = self.pending_response_text orelse {
@@ -643,6 +674,7 @@ pub const Model = struct {
         });
     }
 
+    // Appends streamed text to the pending assistant message.
     fn applyAgentDelta(self: *Model, delta: AgentDelta) !void {
         if (self.pending_response_id != delta.message_id) return;
 
@@ -661,6 +693,7 @@ pub const Model = struct {
         self.transcript.gotoBottom();
     }
 
+    // Builds the completed-message history sent to the agent runtime.
     fn rpcHistory(self: *const Model, allocator: std.mem.Allocator, pending_message_id: u64) ![]RpcChatMessage {
         var count: usize = 0;
         for (self.messages.items) |msg| {
@@ -685,6 +718,7 @@ pub const Model = struct {
         return history;
     }
 
+    // Maps local role enum values to JSON-RPC role strings.
     fn rpcRoleName(role: app.Role) []const u8 {
         return switch (role) {
             .user => "user",
@@ -694,6 +728,7 @@ pub const Model = struct {
         };
     }
 
+    // Frees any buffered response text that is being streamed into the UI.
     fn freePendingResponseText(self: *Model) void {
         if (self.pending_response_text) |text| {
             self.allocator.free(text);
@@ -701,6 +736,7 @@ pub const Model = struct {
         }
     }
 
+    // Joins and frees the active background task if one exists.
     fn freeAgentTask(self: *Model) void {
         if (self.agent_task) |task| {
             task.deinit();
@@ -708,6 +744,7 @@ pub const Model = struct {
         }
     }
 
+    // Replaces one transcript message body with an owned copy of `text`.
     fn replaceMessageText(self: *Model, message_id: u64, text: []const u8) !void {
         for (self.messages.items) |*msg| {
             if (msg.id == message_id) {
@@ -719,6 +756,7 @@ pub const Model = struct {
         }
     }
 
+    // Animates a simple placeholder while the blocking agent task is running.
     fn updateThinkingPlaceholder(self: *Model, message_id: u64) !void {
         const frames = [_][]const u8{
             "Thinking.",
@@ -736,6 +774,7 @@ pub const Model = struct {
         self.transcript.gotoBottom();
     }
 
+    // Marks the pending assistant message as failed and appends the reason.
     fn applyAgentFailure(self: *Model, failed: AgentFailed) !void {
         if (self.pending_response_id != failed.message_id) return;
 
@@ -755,6 +794,7 @@ pub const Model = struct {
         self.transcript.gotoBottom();
     }
 
+    // Marks a streamed assistant message complete once all chunks are applied.
     fn markMessageComplete(self: *Model, message_id: u64) void {
         for (self.messages.items) |*msg| {
             if (msg.id == message_id) {
@@ -764,6 +804,7 @@ pub const Model = struct {
         }
     }
 
+    // Re-renders the transcript viewport from the in-memory message list.
     fn rebuildTranscript(self: *Model) !void {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         const writer = &out.writer;
@@ -792,6 +833,7 @@ pub const Model = struct {
         try self.transcript.setContent(rendered);
     }
 
+    /// Builds the full terminal frame for the current UI mode.
     pub fn view(self: *const Model, ctx: *const zz.Context) []const u8 {
         const allocator = ctx.allocator;
 
@@ -874,6 +916,7 @@ pub const Model = struct {
         return body;
     }
 
+    // Renders the compact or logo header depending on terminal height.
     fn renderHeader(
         self: *const Model,
         allocator: std.mem.Allocator,
@@ -914,6 +957,7 @@ pub const Model = struct {
         return zz.place.place(allocator, width, self.header_height, .left, .top, content);
     }
 
+    // Wraps a list component in the common centered selector panel.
     fn renderSelectionPanel(
         self: *const Model,
         allocator: std.mem.Allocator,
@@ -947,6 +991,7 @@ pub const Model = struct {
         return zz.place.place(allocator, width, 10, .center, .middle, panel);
     }
 
+    // Renders the current create-agent wizard step.
     fn renderAgentWizardPanel(
         self: *const Model,
         allocator: std.mem.Allocator,
@@ -1019,6 +1064,7 @@ pub const Model = struct {
         return zz.place.place(allocator, width, agentWizardPanelHeight(self.mode), .center, .middle, panel);
     }
 
+    // Renders slash-command suggestions below the transcript.
     fn renderSlashCommandPopup(self: *const Model, allocator: std.mem.Allocator) ![]const u8 {
         const value = self.composer.getValue();
         const query = if (value.len > 1) value[1..] else "";
@@ -1088,6 +1134,7 @@ pub const Model = struct {
         return rows.toOwnedSlice();
     }
 
+    // Populates selector lists and applies the shared green selection styling.
     fn initSelectionLists(self: *Model) void {
         self.model_list.height = 6;
         self.model_list.cursor_style = self.model_list.cursor_style.fg(.green).bold(true);
@@ -1141,6 +1188,7 @@ pub const Model = struct {
         self.prepareAgentSelection();
     }
 
+    // Moves the model list cursor to the active model.
     fn prepareModelSelection(self: *Model) void {
         self.model_list.gotoFirst();
         for (self.model_list.items.items, 0..) |item, index| {
@@ -1152,6 +1200,7 @@ pub const Model = struct {
         self.model_list.selectCurrent();
     }
 
+    // Moves the reasoning list cursor to the active effort.
     fn prepareReasoningSelection(self: *Model) void {
         self.reasoning_list.gotoFirst();
         for (self.reasoning_list.items.items, 0..) |item, index| {
@@ -1163,6 +1212,7 @@ pub const Model = struct {
         self.reasoning_list.selectCurrent();
     }
 
+    // Moves the sandbox list cursor to the active sandbox.
     fn prepareSandboxSelection(self: *Model) void {
         self.sandbox_list.gotoFirst();
         for (self.sandbox_list.items.items, 0..) |item, index| {
@@ -1174,6 +1224,7 @@ pub const Model = struct {
         self.sandbox_list.selectCurrent();
     }
 
+    // Moves the agent action list cursor to the last selected action.
     fn prepareAgentSelection(self: *Model) void {
         self.agent_list.gotoFirst();
         for (self.agent_list.items.items, 0..) |item, index| {
@@ -1185,6 +1236,7 @@ pub const Model = struct {
         self.agent_list.selectCurrent();
     }
 
+    // Moves the persisted-agent list cursor to the active agent when possible.
     fn prepareAgentRecordSelection(self: *Model) void {
         self.agent_record_list.gotoFirst();
         if (self.active_agent) |active| {
@@ -1198,6 +1250,7 @@ pub const Model = struct {
         self.agent_record_list.selectCurrent();
     }
 
+    // Loads persisted agents from disk and opens the record selector.
     fn openAgentList(self: *Model, ctx: *zz.Context) void {
         self.clearAgentRecords();
 
@@ -1227,6 +1280,7 @@ pub const Model = struct {
         self.status = if (self.agent_records.items.len == 0) "no agents found" else "select agent";
     }
 
+    // Clones the selected persisted agent into active session state.
     fn selectAgentRecord(self: *Model, index: usize) !void {
         if (index >= self.agent_records.items.len) return error.InvalidAgentSelection;
 
@@ -1240,10 +1294,12 @@ pub const Model = struct {
         ) catch {};
     }
 
+    // Returns the header label for the active agent.
     fn activeAgentLabel(self: *const Model) []const u8 {
         return if (self.active_agent) |agent| agent.name else "none";
     }
 
+    // Agent-specific model settings override the global model selector.
     fn activeModelLabel(self: *const Model) []const u8 {
         if (self.active_agent) |agent| {
             if (agent.model.len > 0) return agent.model;
@@ -1251,11 +1307,13 @@ pub const Model = struct {
         return self.active_model;
     }
 
+    // Returns the selected agent instructions, or empty instructions otherwise.
     fn activeAgentBehavior(self: *const Model) []const u8 {
         if (self.active_agent) |agent| return agent.behavior;
         return "";
     }
 
+    // Frees the active agent clone.
     fn clearActiveAgent(self: *Model) void {
         if (self.active_agent) |*agent| {
             agent.deinit(self.allocator);
@@ -1263,6 +1321,7 @@ pub const Model = struct {
         }
     }
 
+    // Frees loaded agent records and clears the selector items.
     fn clearAgentRecords(self: *Model) void {
         for (self.agent_records.items) |*record| {
             record.deinit(self.allocator);
@@ -1271,6 +1330,7 @@ pub const Model = struct {
         self.agent_record_list.clear();
     }
 
+    // Enters the first step of the create-agent wizard.
     fn startAgentCreation(self: *Model) void {
         self.agent_draft.deinit(self.allocator);
         self.mode = .create_agent_name;
@@ -1282,6 +1342,7 @@ pub const Model = struct {
         self.behavior_text.blur();
     }
 
+    // Leaves the create-agent wizard and discards draft data.
     fn cancelAgentCreation(self: *Model) void {
         self.agent_draft.deinit(self.allocator);
         self.mode = .chat;
@@ -1292,6 +1353,7 @@ pub const Model = struct {
         self.behavior_text.blur();
     }
 
+    // Validates and stores the current create-agent wizard step.
     fn submitAgentWizardStep(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         if (self.mode == .create_agent_behavior) {
             return self.submitAgentBehaviorStep();
@@ -1368,6 +1430,7 @@ pub const Model = struct {
         return .none;
     }
 
+    // Stores the multiline behavior step and advances to model entry.
     fn submitAgentBehaviorStep(self: *Model) zz.Cmd(Msg) {
         const raw = self.behavior_text.getValue(self.allocator) catch {
             self.status = "failed to read behavior";
@@ -1395,12 +1458,14 @@ pub const Model = struct {
         return .none;
     }
 
+    // Replaces one owned draft field with a trimmed copy.
     fn replaceAgentDraftField(self: *Model, field: *?[]u8, value: []const u8) !void {
         const owned = try self.allocator.dupe(u8, value);
         if (field.*) |old| self.allocator.free(old);
         field.* = owned;
     }
 
+    // Adds a system message to the transcript for local UI notices.
     fn appendSystemNotice(self: *Model, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.allocPrint(self.allocator, fmt, args);
         errdefer self.allocator.free(text);
@@ -1415,6 +1480,7 @@ pub const Model = struct {
         });
     }
 
+    /// Recomputes component sizes after terminal resize.
     pub fn resize(self: *Model, width: u16, height: u16) void {
         self.header_height = headerHeight(height);
         self.transcript.setSize(width, transcriptHeight(height));
@@ -1423,6 +1489,7 @@ pub const Model = struct {
     }
 };
 
+// Status text used after choosing an agent action.
 fn agentSelectionStatus(option: AgentOption) []const u8 {
     return switch (option) {
         .create => "agent create selected",
@@ -1431,6 +1498,7 @@ fn agentSelectionStatus(option: AgentOption) []const u8 {
     };
 }
 
+// Footer help text for the active mode.
 fn modeFooterText(mode: UiMode) []const u8 {
     return switch (mode) {
         .chat => "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll",
@@ -1440,6 +1508,7 @@ fn modeFooterText(mode: UiMode) []const u8 {
     };
 }
 
+// Human-readable create-agent wizard step indicator.
 fn agentWizardStepLabel(mode: UiMode) []const u8 {
     return switch (mode) {
         .create_agent_name => "Step 1 of 4",
@@ -1450,6 +1519,7 @@ fn agentWizardStepLabel(mode: UiMode) []const u8 {
     };
 }
 
+// Field label for the active create-agent wizard step.
 fn agentWizardFieldLabel(mode: UiMode) []const u8 {
     return switch (mode) {
         .create_agent_name => "Name",
@@ -1460,6 +1530,7 @@ fn agentWizardFieldLabel(mode: UiMode) []const u8 {
     };
 }
 
+// Prompt text for the active create-agent wizard step.
 fn agentWizardPrompt(mode: UiMode) []const u8 {
     return switch (mode) {
         .create_agent_name => "Enter a short display name for this agent",
@@ -1470,6 +1541,7 @@ fn agentWizardPrompt(mode: UiMode) []const u8 {
     };
 }
 
+// Validation status when the active wizard field is empty.
 fn agentWizardRequiredStatus(mode: UiMode) []const u8 {
     return switch (mode) {
         .create_agent_name => "agent name is required",
@@ -1480,6 +1552,7 @@ fn agentWizardRequiredStatus(mode: UiMode) []const u8 {
     };
 }
 
+// Help text shown inside the create-agent wizard panel.
 fn agentWizardHelp(mode: UiMode) []const u8 {
     return if (mode == .create_agent_behavior)
         "Enter inserts newline | Ctrl+D or Ctrl+Enter continues | Esc cancels"
@@ -1487,10 +1560,12 @@ fn agentWizardHelp(mode: UiMode) []const u8 {
         "Enter continues | Esc cancels";
 }
 
+// Panel height is taller for the multiline behavior editor.
 fn agentWizardPanelHeight(mode: UiMode) u16 {
     return if (mode == .create_agent_behavior) 24 else 14;
 }
 
+// Computes a bounded editor width so the wizard remains usable on small terminals.
 fn agentBehaviorEditorWidth(width: u16) u16 {
     var editor_width = width -| 8;
     if (editor_width > 68) editor_width = 68;
@@ -1498,6 +1573,7 @@ fn agentBehaviorEditorWidth(width: u16) u16 {
     return editor_width;
 }
 
+// Computes a bounded editor height for the multiline behavior step.
 fn agentBehaviorEditorHeight(height: u16) u16 {
     var editor_height = height / 3;
     if (editor_height > 12) editor_height = 12;
@@ -1505,6 +1581,7 @@ fn agentBehaviorEditorHeight(height: u16) u16 {
     return editor_height;
 }
 
+// Chooses between compact and logo header layouts.
 fn headerHeight(height: u16) u16 {
     return if (height > logo_header_height + footer_height)
         logo_header_height
@@ -1512,6 +1589,7 @@ fn headerHeight(height: u16) u16 {
         compact_header_height;
 }
 
+// Leaves room for header and footer when sizing the transcript viewport.
 fn transcriptHeight(height: u16) u16 {
     return height -| headerHeight(height) -| footer_height;
 }

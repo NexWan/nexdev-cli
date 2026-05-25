@@ -1,3 +1,9 @@
+//! Agent persistence and runtime bridge helpers.
+//!
+//! This module owns the app-private pieces that are not TUI rendering: persisted
+//! agent configs, the create-agent draft, executable discovery, and the
+//! background JSON-RPC task used to call the TypeScript agent runtime.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const app = @import("nexdev_cli");
@@ -6,17 +12,20 @@ const rpc = @import("zig_rpc");
 const ModelOption = app.ModelOption;
 const modelOptionLabel = app.modelOptionLabel;
 
+/// Chat message shape sent to the TypeScript JSON-RPC agent process.
 pub const RpcChatMessage = struct {
     role: []const u8,
     content: []const u8,
 };
 
+/// Mutable state collected by the create-agent wizard before it is persisted.
 pub const AgentDraft = struct {
     name: ?[]u8 = null,
     description: ?[]u8 = null,
     behavior: ?[]u8 = null,
     model: ?[]u8 = null,
 
+    /// Frees any draft fields already collected by the wizard.
     pub fn deinit(self: *AgentDraft, allocator: std.mem.Allocator) void {
         if (self.name) |value| allocator.free(value);
         if (self.description) |value| allocator.free(value);
@@ -26,6 +35,7 @@ pub const AgentDraft = struct {
     }
 };
 
+/// A persisted agent definition loaded from disk.
 pub const AgentConfig = struct {
     name: []u8,
     description: []u8,
@@ -33,6 +43,7 @@ pub const AgentConfig = struct {
     model: []u8,
     path: []u8,
 
+    /// Releases all owned strings in the loaded config.
     pub fn deinit(self: *AgentConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.description);
@@ -42,6 +53,7 @@ pub const AgentConfig = struct {
         self.* = undefined;
     }
 
+    /// Makes an owned copy so the TUI can keep a selected agent independently.
     pub fn clone(self: AgentConfig, allocator: std.mem.Allocator) !AgentConfig {
         const name = try allocator.dupe(u8, self.name);
         errdefer allocator.free(name);
@@ -68,6 +80,7 @@ pub const AgentConfig = struct {
     }
 };
 
+/// JSON file format stored under the app data agents directory.
 const AgentFileJson = struct {
     version: u32 = 1,
     name: []const u8,
@@ -76,10 +89,12 @@ const AgentFileJson = struct {
     model: []const u8,
 };
 
+/// Completed background agent task result.
 pub const AgentTaskResult = union(enum) {
     text: []u8,
     failure: []u8,
 
+    /// Releases the owned success or failure payload.
     pub fn deinit(self: AgentTaskResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .text => |value| allocator.free(value),
@@ -88,6 +103,7 @@ pub const AgentTaskResult = union(enum) {
     }
 };
 
+/// Background worker that calls the TypeScript runtime without blocking input.
 pub const AgentTask = struct {
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
@@ -104,6 +120,7 @@ pub const AgentTask = struct {
     done: std.atomic.Value(bool) = .init(false),
     result: ?AgentTaskResult = null,
 
+    /// Copies all request data and starts the worker thread.
     pub fn start(
         allocator: std.mem.Allocator,
         environ_map: *const std.process.Environ.Map,
@@ -178,6 +195,7 @@ pub const AgentTask = struct {
         return task;
     }
 
+    /// Returns the worker result once, or null while the task is still running.
     pub fn takeResult(self: *AgentTask) ?AgentTaskResult {
         if (!self.done.load(.acquire)) return null;
         const result = self.result orelse return null;
@@ -185,6 +203,7 @@ pub const AgentTask = struct {
         return result;
     }
 
+    /// Joins the worker and frees all request/result memory.
     pub fn deinit(self: *AgentTask) void {
         if (self.thread) |thread| {
             thread.join();
@@ -198,6 +217,7 @@ pub const AgentTask = struct {
         self.allocator.destroy(self);
     }
 
+    // Releases the duplicated request fields owned by the task.
     fn freeOwned(self: *AgentTask) void {
         self.allocator.free(self.text);
         self.allocator.free(self.node_path);
@@ -212,6 +232,7 @@ pub const AgentTask = struct {
         self.allocator.free(self.history);
     }
 
+    // Thread entrypoint that performs the blocking JSON-RPC request.
     fn run(self: *AgentTask) void {
         var io_instance: std.Io.Threaded = .init(self.allocator, .{});
         defer io_instance.deinit();
@@ -242,6 +263,7 @@ pub const AgentTask = struct {
     }
 };
 
+/// Loads and sorts persisted agent records from the app data directory.
 pub fn loadAgentRecords(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -275,6 +297,7 @@ pub fn loadAgentRecords(
     std.mem.sort(AgentConfig, records.items, {}, agentConfigLessThan);
 }
 
+// Parses one persisted agent JSON file and records the path it was loaded from.
 fn parseAgentConfig(
     allocator: std.mem.Allocator,
     agents_dir_path: []const u8,
@@ -310,10 +333,12 @@ fn parseAgentConfig(
     };
 }
 
+// Sorts agent records by display name for stable selector ordering.
 fn agentConfigLessThan(_: void, lhs: AgentConfig, rhs: AgentConfig) bool {
     return std.ascii.lessThanIgnoreCase(lhs.name, rhs.name);
 }
 
+/// Persists a completed create-agent draft and returns the written path.
 pub fn saveAgentDraft(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -353,6 +378,7 @@ pub fn saveAgentDraft(
     return writeUniqueAgentFile(allocator, io, agents_dir, slug, json_bytes);
 }
 
+// Resolves the data directory used for persisted agents.
 fn resolveAppDataDir(
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
@@ -386,6 +412,7 @@ fn resolveAppDataDir(
     return std.fs.path.join(allocator, &.{ home, ".local", "share", "nexdev-cli" });
 }
 
+// Converts an agent display name into a stable filesystem-friendly basename.
 fn agentFileSlug(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     const writer = &out.writer;
@@ -415,6 +442,7 @@ fn agentFileSlug(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+// Writes the agent config without overwriting an existing file.
 fn writeUniqueAgentFile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -451,6 +479,7 @@ fn writeUniqueAgentFile(
     return error.TooManyAgentFiles;
 }
 
+/// Returns true when a pasted model label exactly matches a known option.
 pub fn isKnownModelLabel(value: []const u8) bool {
     inline for (std.meta.fields(ModelOption)) |field| {
         const option: ModelOption = @enumFromInt(field.value);
@@ -459,6 +488,7 @@ pub fn isKnownModelLabel(value: []const u8) bool {
     return false;
 }
 
+// Sends one message request to the TypeScript JSON-RPC process.
 fn requestTypeScriptResponse(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -508,6 +538,7 @@ fn requestTypeScriptResponse(
     return .{ .text = owned_text };
 }
 
+/// Resolves an executable by searching PATH unless `name` already has a path.
 pub fn resolveExecutable(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -539,6 +570,7 @@ pub fn resolveExecutable(
     return error.FileNotFound;
 }
 
+// Detects whether a command already names a path instead of a bare executable.
 fn hasPathSeparator(path: []const u8) bool {
     for (path) |char| {
         if (char == '/' or char == '\\') return true;
@@ -547,6 +579,7 @@ fn hasPathSeparator(path: []const u8) bool {
     return false;
 }
 
+// Checks a single directory for an executable candidate.
 fn resolveExecutableInDir(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -561,6 +594,7 @@ fn resolveExecutableInDir(
     return null;
 }
 
+/// Resolves the TypeScript agent entrypoint for dev, installed, and portable layouts.
 pub fn resolveAgentEntrypoint(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -601,6 +635,7 @@ pub fn resolveAgentEntrypoint(
     return error.FileNotFound;
 }
 
+// Returns true when the path exists and is executable.
 fn canExecutePath(io: std.Io, path: []const u8) bool {
     if (std.fs.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io, path, .{ .execute = true }) catch return false;
@@ -611,6 +646,7 @@ fn canExecutePath(io: std.Io, path: []const u8) bool {
     return true;
 }
 
+// Returns true when the path exists and can be read/accessed.
 fn canAccessPath(io: std.Io, path: []const u8) bool {
     if (std.fs.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
@@ -621,6 +657,7 @@ fn canAccessPath(io: std.Io, path: []const u8) bool {
     return true;
 }
 
+// Normalizes subprocess termination into an error on non-zero or abnormal exit.
 fn expectExitedZero(term: std.process.Child.Term) !void {
     switch (term) {
         .exited => |code| if (code == 0) return else return error.ChildExitedNonZero,
