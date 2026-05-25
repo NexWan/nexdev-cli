@@ -56,6 +56,14 @@ function stringParam(params: JsonObject, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function nonEmptyStringParam(
+  params: JsonObject,
+  key: string,
+): string | undefined {
+  const value = stringParam(params, key);
+  return value && value.trim().length > 0 ? value : undefined;
+}
+
 function formatTranscript(messages: unknown): string {
   if (!Array.isArray(messages)) return "";
 
@@ -96,6 +104,10 @@ async function handleMessage(message: JsonObject): Promise<void> {
   const messages = Array.isArray(params.messages) ? params.messages : [];
   const text =
     typeof params.text === "string" ? params.text : latestUserMessage(messages);
+  const requestedSystemInstruction =
+    nonEmptyStringParam(params, "systemInstruction") ??
+    nonEmptyStringParam(params, "system_instruction") ??
+    systemInstruction;
 
   stderr.write(`received from zig: ${JSON.stringify(message)}\n`);
 
@@ -110,7 +122,7 @@ async function handleMessage(message: JsonObject): Promise<void> {
       stringParam(params, "sandbox_mode") ??
       "workspace-write",
     workspaceDir: process.cwd(),
-    systemInstruction,
+    systemInstruction: requestedSystemInstruction,
     skipGitRepoCheck: true,
   });
 

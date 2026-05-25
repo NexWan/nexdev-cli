@@ -50,6 +50,56 @@ const AgentDraft = struct {
     }
 };
 
+const AgentConfig = struct {
+    name: []u8,
+    description: []u8,
+    behavior: []u8,
+    model: []u8,
+    path: []u8,
+
+    fn deinit(self: *AgentConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.description);
+        allocator.free(self.behavior);
+        allocator.free(self.model);
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+
+    fn clone(self: AgentConfig, allocator: std.mem.Allocator) !AgentConfig {
+        const name = try allocator.dupe(u8, self.name);
+        errdefer allocator.free(name);
+
+        const description = try allocator.dupe(u8, self.description);
+        errdefer allocator.free(description);
+
+        const behavior = try allocator.dupe(u8, self.behavior);
+        errdefer allocator.free(behavior);
+
+        const model = try allocator.dupe(u8, self.model);
+        errdefer allocator.free(model);
+
+        const path = try allocator.dupe(u8, self.path);
+        errdefer allocator.free(path);
+
+        return .{
+            .name = name,
+            .description = description,
+            .behavior = behavior,
+            .model = model,
+            .path = path,
+        };
+    }
+};
+
+const AgentFileJson = struct {
+    version: u32 = 1,
+    name: []const u8,
+    description: []const u8,
+    behavior: []const u8,
+    model: []const u8,
+};
+
 const AgentTaskResult = union(enum) {
     text: []u8,
     failure: []u8,
@@ -71,6 +121,7 @@ const AgentTask = struct {
     model: []u8,
     reasoning_effort: []u8,
     sandbox_mode: []u8,
+    system_instruction: []u8,
     text: []u8,
     history: []RpcChatMessage,
     thread: ?std.Thread = null,
@@ -86,6 +137,7 @@ const AgentTask = struct {
         model: []const u8,
         reasoning_effort: []const u8,
         sandbox_mode: []const u8,
+        system_instruction: []const u8,
         text: []const u8,
         history: []const RpcChatMessage,
     ) !*AgentTask {
@@ -109,6 +161,9 @@ const AgentTask = struct {
 
         const owned_sandbox_mode = try allocator.dupe(u8, sandbox_mode);
         errdefer allocator.free(owned_sandbox_mode);
+
+        const owned_system_instruction = try allocator.dupe(u8, system_instruction);
+        errdefer allocator.free(owned_system_instruction);
 
         const owned_history = try allocator.alloc(RpcChatMessage, history.len);
         errdefer allocator.free(owned_history);
@@ -137,6 +192,7 @@ const AgentTask = struct {
             .model = owned_model,
             .reasoning_effort = owned_reasoning_effort,
             .sandbox_mode = owned_sandbox_mode,
+            .system_instruction = owned_system_instruction,
             .text = owned_text,
             .history = owned_history,
         };
@@ -173,6 +229,7 @@ const AgentTask = struct {
         self.allocator.free(self.model);
         self.allocator.free(self.reasoning_effort);
         self.allocator.free(self.sandbox_mode);
+        self.allocator.free(self.system_instruction);
         for (self.history) |entry| {
             self.allocator.free(entry.content);
         }
@@ -193,6 +250,7 @@ const AgentTask = struct {
             self.model,
             self.reasoning_effort,
             self.sandbox_mode,
+            self.system_instruction,
             self.text,
             self.history,
         ) catch |err| AgentTaskResult{
@@ -230,10 +288,13 @@ const Model = struct {
     reasoning_list: zz.List(ReasoningOption),
     sandbox_list: zz.List(SandboxOption),
     agent_list: zz.List(AgentOption),
+    agent_record_list: zz.List(usize),
+    agent_records: std.array_list.Managed(AgentConfig),
     active_model: []const u8,
     active_reasoning: []const u8,
     active_sandbox: []const u8,
     active_agent_action: []const u8,
+    active_agent: ?AgentConfig,
     agent_draft: AgentDraft,
 
     pub const Msg = union(enum) {
@@ -271,10 +332,13 @@ const Model = struct {
             .reasoning_list = zz.List(ReasoningOption).init(allocator),
             .sandbox_list = zz.List(SandboxOption).init(allocator),
             .agent_list = zz.List(AgentOption).init(allocator),
+            .agent_record_list = zz.List(usize).init(allocator),
+            .agent_records = std.array_list.Managed(AgentConfig).init(allocator),
             .active_model = modelOptionLabel(.gpt_5_5),
             .active_reasoning = reasoningOptionLabel(.medium),
             .active_sandbox = sandboxOptionLabel(.workspace_write),
             .active_agent_action = "none",
+            .active_agent = null,
             .agent_draft = .{},
         };
         self.composer.setPrompt("> ");
@@ -307,6 +371,8 @@ const Model = struct {
         self.freeAgentTask();
         self.freePendingResponseText();
         self.agent_draft.deinit(self.allocator);
+        self.clearActiveAgent();
+        self.clearAgentRecords();
         self.messages.deinit();
         self.composer.deinit();
         self.behavior_text.deinit();
@@ -315,6 +381,8 @@ const Model = struct {
         self.reasoning_list.deinit();
         self.sandbox_list.deinit();
         self.agent_list.deinit();
+        self.agent_record_list.deinit();
+        self.agent_records.deinit();
     }
 
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -382,7 +450,8 @@ const Model = struct {
             .select_model => self.handleModelSelectionKey(key),
             .select_reasoning => self.handleReasoningSelectionKey(key),
             .select_sandbox => self.handleSandboxSelectionKey(key),
-            .select_agents => self.handleAgentSelectionKey(key),
+            .select_agents => self.handleAgentSelectionKey(key, ctx),
+            .select_agent => self.handleAgentRecordSelectionKey(key),
             .create_agent_name, .create_agent_description, .create_agent_behavior, .create_agent_model => self.handleAgentWizardKey(key, ctx),
         };
     }
@@ -495,7 +564,7 @@ const Model = struct {
         }
     }
 
-    fn handleAgentSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
+    fn handleAgentSelectionKey(self: *Model, key: zz.KeyEvent, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (key.key) {
             .escape => {
                 self.mode = .chat;
@@ -507,7 +576,8 @@ const Model = struct {
                     self.active_agent_action = agentOptionLabel(value);
                     switch (value) {
                         .create => self.startAgentCreation(),
-                        .list, .view => {
+                        .list => self.openAgentList(ctx),
+                        .view => {
                             self.mode = .chat;
                             self.status = agentSelectionStatus(value);
                         },
@@ -517,6 +587,35 @@ const Model = struct {
             },
             else => {
                 self.agent_list.handleKey(key);
+                return .none;
+            },
+        }
+    }
+
+    fn handleAgentRecordSelectionKey(self: *Model, key: zz.KeyEvent) zz.Cmd(Msg) {
+        switch (key.key) {
+            .escape => {
+                self.mode = .chat;
+                self.status = "idle";
+                return .none;
+            },
+            .enter => {
+                if (self.agent_record_list.selectedValue()) |index| {
+                    self.selectAgentRecord(index) catch {
+                        self.status = "failed to select agent";
+                        return .none;
+                    };
+                    self.mode = .chat;
+                    self.status = "agent selected";
+                    self.rebuildTranscript() catch {};
+                    self.transcript.gotoBottom();
+                } else {
+                    self.status = "no agent selected";
+                }
+                return .none;
+            },
+            else => {
+                self.agent_record_list.handleKey(key);
                 return .none;
             },
         }
@@ -691,9 +790,10 @@ const Model = struct {
             node_path,
             agent_entrypoint,
             assistant_id,
-            self.active_model,
+            self.activeModelLabel(),
             self.active_reasoning,
             self.active_sandbox,
+            self.activeAgentBehavior(),
             user_text,
             history,
         ) catch {
@@ -967,6 +1067,13 @@ const Model = struct {
                 self.active_agent_action,
                 self.agent_list.view(allocator) catch "",
             ) catch transcript_view,
+            .select_agent => self.renderSelectionPanel(
+                allocator,
+                ctx.width,
+                "Select Agent",
+                self.activeAgentLabel(),
+                self.agent_record_list.view(allocator) catch "",
+            ) catch transcript_view,
             .create_agent_name, .create_agent_description, .create_agent_behavior, .create_agent_model => self.renderAgentWizardPanel(
                 allocator,
                 ctx.width,
@@ -1010,8 +1117,8 @@ const Model = struct {
         const title = try title_style.render(allocator, "NexDev - CLI");
         const meta_raw = try std.fmt.allocPrint(
             allocator,
-            "Model: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
-            .{ self.active_model, self.active_reasoning, self.active_sandbox, self.status },
+            "Model: {s} | Agent: {s} | Reasoning: {s} | Sandbox: {s} | Status: {s}",
+            .{ self.activeModelLabel(), self.activeAgentLabel(), self.active_reasoning, self.active_sandbox, self.status },
         );
         const meta = try meta_style.render(allocator, meta_raw);
         const rule = try dim_style.render(allocator, "Chat history is kept in memory for this session");
@@ -1255,6 +1362,11 @@ const Model = struct {
             zz.List(AgentOption).Item.withDescription(.view, agentOptionLabel(.view), agentOptionDescription(.view)),
         }) catch {};
 
+        self.agent_record_list.height = 8;
+        self.agent_record_list.cursor_style = self.agent_record_list.cursor_style.fg(.green).bold(true);
+        self.agent_record_list.selected_style = self.agent_record_list.selected_style.fg(.green);
+        self.agent_record_list.status_message = "Enter to use agent";
+
         self.prepareModelSelection();
         self.prepareReasoningSelection();
         self.prepareSandboxSelection();
@@ -1303,6 +1415,92 @@ const Model = struct {
             }
         }
         self.agent_list.selectCurrent();
+    }
+
+    fn prepareAgentRecordSelection(self: *Model) void {
+        self.agent_record_list.gotoFirst();
+        if (self.active_agent) |active| {
+            for (self.agent_records.items, 0..) |record, index| {
+                if (std.mem.eql(u8, record.path, active.path)) {
+                    self.agent_record_list.cursor = index;
+                    break;
+                }
+            }
+        }
+        self.agent_record_list.selectCurrent();
+    }
+
+    fn openAgentList(self: *Model, ctx: *zz.Context) void {
+        self.clearAgentRecords();
+
+        loadAgentRecords(
+            self.allocator,
+            ctx.io,
+            ctx.environ_map,
+            &self.agent_records,
+        ) catch {
+            self.clearAgentRecords();
+            self.mode = .chat;
+            self.status = "failed to load agents";
+            return;
+        };
+
+        for (self.agent_records.items, 0..) |record, index| {
+            self.agent_record_list.addItem(.withDescription(index, record.name, record.description)) catch {
+                self.clearAgentRecords();
+                self.mode = .chat;
+                self.status = "failed to build agent list";
+                return;
+            };
+        }
+
+        self.prepareAgentRecordSelection();
+        self.mode = .select_agent;
+        self.status = if (self.agent_records.items.len == 0) "no agents found" else "select agent";
+    }
+
+    fn selectAgentRecord(self: *Model, index: usize) !void {
+        if (index >= self.agent_records.items.len) return error.InvalidAgentSelection;
+
+        const selected = try self.agent_records.items[index].clone(self.allocator);
+        self.clearActiveAgent();
+        self.active_agent = selected;
+
+        self.appendSystemNotice(
+            "Agent \"{s}\" selected.",
+            .{self.active_agent.?.name},
+        ) catch {};
+    }
+
+    fn activeAgentLabel(self: *const Model) []const u8 {
+        return if (self.active_agent) |agent| agent.name else "none";
+    }
+
+    fn activeModelLabel(self: *const Model) []const u8 {
+        if (self.active_agent) |agent| {
+            if (agent.model.len > 0) return agent.model;
+        }
+        return self.active_model;
+    }
+
+    fn activeAgentBehavior(self: *const Model) []const u8 {
+        if (self.active_agent) |agent| return agent.behavior;
+        return "";
+    }
+
+    fn clearActiveAgent(self: *Model) void {
+        if (self.active_agent) |*agent| {
+            agent.deinit(self.allocator);
+            self.active_agent = null;
+        }
+    }
+
+    fn clearAgentRecords(self: *Model) void {
+        for (self.agent_records.items) |*record| {
+            record.deinit(self.allocator);
+        }
+        self.agent_records.clearRetainingCapacity();
+        self.agent_record_list.clear();
     }
 
     fn startAgentCreation(self: *Model) void {
@@ -1468,7 +1666,7 @@ fn agentSelectionStatus(option: AgentOption) []const u8 {
 fn modeFooterText(mode: UiMode) []const u8 {
     return switch (mode) {
         .chat => "Enter sends | Esc quits | Mouse wheel/PageUp/PageDown scroll",
-        .select_model, .select_reasoning, .select_sandbox, .select_agents => "Enter selects | Esc cancels",
+        .select_model, .select_reasoning, .select_sandbox, .select_agents, .select_agent => "Enter selects | Esc cancels",
         .create_agent_behavior => "Enter inserts newline | Ctrl+D or Ctrl+Enter continues | Esc cancels",
         .create_agent_name, .create_agent_description, .create_agent_model => "Enter continues | Esc cancels",
     };
@@ -1545,6 +1743,78 @@ fn agentBehaviorEditorHeight(height: u16) u16 {
     if (editor_height > 12) editor_height = 12;
     if (editor_height < 8) editor_height = 8;
     return editor_height;
+}
+
+fn loadAgentRecords(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    records: *std.array_list.Managed(AgentConfig),
+) !void {
+    const data_dir = try resolveAppDataDir(allocator, environ_map);
+    defer allocator.free(data_dir);
+
+    const agents_dir_path = try std.fs.path.join(allocator, &.{ data_dir, "agents" });
+    defer allocator.free(agents_dir_path);
+
+    var agents_dir = std.Io.Dir.openDirAbsolute(io, agents_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer agents_dir.close(io);
+
+    var iterator = agents_dir.iterateAssumeFirstIteration();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+
+        const bytes = agents_dir.readFileAlloc(io, entry.name, allocator, .limited(1024 * 1024)) catch continue;
+        defer allocator.free(bytes);
+
+        const record = parseAgentConfig(allocator, agents_dir_path, entry.name, bytes) catch continue;
+        try records.append(record);
+    }
+
+    std.mem.sort(AgentConfig, records.items, {}, agentConfigLessThan);
+}
+
+fn parseAgentConfig(
+    allocator: std.mem.Allocator,
+    agents_dir_path: []const u8,
+    filename: []const u8,
+    bytes: []const u8,
+) !AgentConfig {
+    var parsed = try std.json.parseFromSlice(AgentFileJson, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const path = try std.fs.path.join(allocator, &.{ agents_dir_path, filename });
+    errdefer allocator.free(path);
+
+    const name = try allocator.dupe(u8, parsed.value.name);
+    errdefer allocator.free(name);
+
+    const description = try allocator.dupe(u8, parsed.value.description);
+    errdefer allocator.free(description);
+
+    const behavior = try allocator.dupe(u8, parsed.value.behavior);
+    errdefer allocator.free(behavior);
+
+    const model = try allocator.dupe(u8, parsed.value.model);
+    errdefer allocator.free(model);
+
+    return .{
+        .name = name,
+        .description = description,
+        .behavior = behavior,
+        .model = model,
+        .path = path,
+    };
+}
+
+fn agentConfigLessThan(_: void, lhs: AgentConfig, rhs: AgentConfig) bool {
+    return std.ascii.lessThanIgnoreCase(lhs.name, rhs.name);
 }
 
 fn saveAgentDraft(
@@ -1701,6 +1971,28 @@ test "agent model validation rejects pasted headings" {
     try std.testing.expect(!isKnownModelLabel("## Primary Responsibilities"));
 }
 
+test "agent config parser reads persisted agent json" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "name": "Review Agent",
+        \\  "description": "Reviews code",
+        \\  "behavior": "Find issues",
+        \\  "model": "GPT-5.5"
+        \\}
+    ;
+
+    var config = try parseAgentConfig(allocator, "/tmp/agents", "review-agent.json", json);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqualStrings("Review Agent", config.name);
+    try std.testing.expectEqualStrings("Reviews code", config.description);
+    try std.testing.expectEqualStrings("Find issues", config.behavior);
+    try std.testing.expectEqualStrings("GPT-5.5", config.model);
+    try std.testing.expectEqualStrings("/tmp/agents/review-agent.json", config.path);
+}
+
 fn requestTypeScriptResponse(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1711,6 +2003,7 @@ fn requestTypeScriptResponse(
     model: []const u8,
     reasoning_effort: []const u8,
     sandbox_mode: []const u8,
+    system_instruction: []const u8,
     text: []const u8,
     history: []const RpcChatMessage,
 ) !AgentTaskResult {
@@ -1725,6 +2018,7 @@ fn requestTypeScriptResponse(
         .model = model,
         .reasoning_effort = reasoning_effort,
         .sandbox_mode = sandbox_mode,
+        .system_instruction = system_instruction,
         .text = text,
         .messages = history,
     });

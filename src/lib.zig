@@ -27,6 +27,7 @@ pub const UiMode = enum {
     select_reasoning,
     select_sandbox,
     select_agents,
+    select_agent,
     create_agent_name,
     create_agent_description,
     create_agent_behavior,
